@@ -6,6 +6,10 @@
 //
 
 #import <dlfcn.h>
+#import "StrataJITGuestGate.h"
+#import "StrataGuestMemory.h"
+#import "../LiveContainer/LCSharedUtils.h"
+#import "../LiveContainer/StrataRuntimePath.h"
 #import <UIKit/UIKit.h>
 #import <mach-o/dyld.h>
 #import "../LiveContainer/utils.h"
@@ -54,7 +58,7 @@ int LiveProcessMain(int argc, char *argv[]) {
         return payloadEntry(argc, argv, _envp, _apple);
     }
     
-    NSLog(@"Retrieved app info: %@", appInfo);
+
     // Set LiveContainer's home path
     setenv("LP_HOME_PATH", getenv("HOME"), 1);
     const char *overrideHomePath = [appInfo[@"lcHomePath"] fileSystemRepresentation];
@@ -72,10 +76,24 @@ int LiveProcessMain(int argc, char *argv[]) {
     for(int i = 0; i < bookmarks.count; i++) {
         bool isStale = false;
         NSError* error = nil;
-        bookmarkedUrls[i] = [NSURL URLByResolvingBookmarkData:bookmarks[i] options:0 relativeToURL:nil bookmarkDataIsStale:&isStale error:&error];
-        access = [bookmarkedUrls[i] startAccessingSecurityScopedResource];
+        NSURL *url = [NSURL URLByResolvingBookmarkData:bookmarks[i] options:0 relativeToURL:nil bookmarkDataIsStale:&isStale error:&error];
+        if (!url) {
+            [LiveProcessHandler.extensionContext cancelRequestWithError:error ?: [NSError errorWithDomain:@"StrataRuntime" code:3 userInfo:@{NSLocalizedDescriptionKey:@"Cannot resolve guest file access. Relaunch from the app library."}]];
+            return 1;
+        }
+        [bookmarkedUrls addObject:url];
+        access = [url startAccessingSecurityScopedResource];
     }
     
+    NSString *runtimeName = appInfo[@"strataRuntimeName"];
+    if (runtimeName.length) {
+        bool shared = false;
+        NSBundle *runtime = StrataFind32BitRuntime(runtimeName, [NSURL fileURLWithPath:[NSString stringWithFormat:@"%s/Documents", getenv("LC_HOME_PATH")]], [LCSharedUtils appGroupPath]);
+        if (!runtime.executablePath || ![NSFileManager.defaultManager isReadableFileAtPath:runtime.executablePath]) {
+            [LiveProcessHandler.extensionContext cancelRequestWithError:[NSError errorWithDomain:@"StrataRuntime" code:4 userInfo:@{NSLocalizedDescriptionKey:@"The guest cannot read its selected 32-bit runtime after granting file access."}]];
+            return 1;
+        }
+    }
     if ([appInfo[@"selected"] isEqualToString:@"builtinSideStore"]) {
         if(access && bookmarkedUrls.count > 0) {
             [lcUserDefaults setObject:bookmarkedUrls.firstObject.path forKey:@"specifiedSideStoreContainerPath"];
@@ -97,6 +115,24 @@ int LiveProcessMain(int argc, char *argv[]) {
     }
 
     
+    NSString *jitToken = appInfo[@"strataJITToken"];
+    if (jitToken) {
+        NSString *group = appInfo[@"strataJITGroup"];
+        NSURL *root = group ? [NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:group] : nil;
+        NSError *gateError = StrataWaitForGuestDebugger(jitToken, root, 360, ^BOOL(NSError **error) {
+            unsigned int flags = 0;
+            if (csops(getpid(), 0, &flags, sizeof(flags)) != 0) {
+                *error = [NSError errorWithDomain:@"StrataJITGuest" code:13 userInfo:@{NSLocalizedDescriptionKey:@"Cannot read guest debugging status."}];
+                return NO;
+            }
+            return (flags & CS_DEBUGGED) != 0;
+        });
+        if (gateError) {
+            [LiveProcessHandler.extensionContext cancelRequestWithError:gateError];
+            return 1;
+        }
+    }
+    StrataStartGuestMemoryDiagnostics(appInfo[@"strataDiagnosticsGroup"], appInfo[@"selected"]);
     return LiveContainerMain(argc, argv);
 }
 

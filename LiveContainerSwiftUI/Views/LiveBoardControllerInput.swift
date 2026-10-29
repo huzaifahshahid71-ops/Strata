@@ -11,6 +11,7 @@ final class LiveBoardControllerInput: ObservableObject {
     @Published private(set) var confirmSymbol = "a.circle"
     @Published private(set) var detailsSymbol = "x.circle"
     var onCommand: ((Command) -> Void)?
+    private static let owners = NSMapTable<GCExtendedGamepad, LiveBoardControllerInput>.weakToWeakObjects()
     private var active = false
     private var observers: [NSObjectProtocol] = []
     private var profiles: [(GCExtendedGamepad, GCExtendedGamepadValueChangedHandler?)] = []
@@ -18,10 +19,11 @@ final class LiveBoardControllerInput: ObservableObject {
     private var heldDirection: Command?
 
     func start() {
-        guard !active else { return }
+        guard !active else {
+            for controller in GCController.controllers() { attach(controller) }
+            return
+        }
         active = true
-        for controller in GCController.controllers() { attach(controller) }
-        connected = !profiles.isEmpty
         let center = NotificationCenter.default
         observers = [
             center.addObserver(forName: .GCControllerDidConnect, object: nil, queue: .main) { [weak self] notification in
@@ -33,13 +35,19 @@ final class LiveBoardControllerInput: ObservableObject {
                 Task { @MainActor [weak self] in self?.detach(controller) }
             }
         ]
+        // Observe before enumeration so a controller arriving during startup cannot be missed.
+        for controller in GCController.controllers() { attach(controller) }
+        connected = !profiles.isEmpty
     }
     func stop() {
         onCommand = nil
         guard active else { return }
         active = false
         repeatTask?.cancel(); repeatTask = nil; heldDirection = nil
-        for (profile, previous) in profiles { profile.valueChangedHandler = previous }
+        for (profile, previous) in profiles where Self.owners.object(forKey: profile) === self {
+            profile.valueChangedHandler = previous
+            Self.owners.removeObject(forKey: profile)
+        }
         profiles.removeAll()
         for observer in observers { NotificationCenter.default.removeObserver(observer) }
         observers.removeAll(); connected = false
@@ -48,6 +56,12 @@ final class LiveBoardControllerInput: ObservableObject {
     func attach(_ controller: GCController) {
         guard active, let profile = controller.extendedGamepad,
               !profiles.contains(where: { $0.0 === profile }) else { return }
+        // SwiftUI can mount the new mode before unmounting the old one. Transfer
+        // ownership first so the old view cannot restore over the new handler.
+        if let previousOwner = Self.owners.object(forKey: profile), previousOwner !== self {
+            previousOwner.detach(controller)
+        }
+        Self.owners.setObject(self, forKey: profile)
         profiles.append((profile, profile.valueChangedHandler))
         profile.valueChangedHandler = { [weak self] gamepad, element in
             Task { @MainActor [weak self] in self?.handle(gamepad, element: element) }
@@ -59,7 +73,11 @@ final class LiveBoardControllerInput: ObservableObject {
     private func detach(_ controller: GCController) {
         guard let profile = controller.extendedGamepad else { return }
         if let index = profiles.firstIndex(where: { $0.0 === profile }) {
-            let previous = profiles.remove(at: index); profile.valueChangedHandler = previous.1
+            let previous = profiles.remove(at: index)
+            if Self.owners.object(forKey: profile) === self {
+                profile.valueChangedHandler = previous.1
+                Self.owners.removeObject(forKey: profile)
+            }
         }
         repeatTask?.cancel(); heldDirection = nil
         connected = !profiles.isEmpty

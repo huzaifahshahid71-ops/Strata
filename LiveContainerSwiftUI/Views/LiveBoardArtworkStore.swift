@@ -7,14 +7,33 @@ final class LiveBoardArtworkStore: ObservableObject {
     private let defaults = LCUtils.appGroupUserDefault
     private var cache: [String: UIImage] = [:]
     private var mappings: [String: String] { defaults.dictionary(forKey: "LiveBoardConsoleArtwork") as? [String: String] ?? [:] }
-    private var directory: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("LiveBoard/Artwork", isDirectory: true)
+    private var files: LiveBoardArtworkFiles {
+        LiveBoardArtworkFiles(
+            directory: FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("Artwork", isDirectory: true),
+            legacyDirectory: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("LiveBoard/Artwork", isDirectory: true))
+    }
+    init() { reloadFromDisk() }
+    func reloadFromDisk() {
+        if let migrated = try? files.migrate(mappings) {
+            defaults.set(migrated, forKey: "LiveBoardConsoleArtwork")
+        }
+        writeIndex()
+        cache.removeAll(); revision += 1
+    }
+    private func writeIndex() {
+        guard let data = try? JSONSerialization.data(withJSONObject: mappings, options: [.prettyPrinted, .sortedKeys]) else { return }
+        try? data.write(to: files.directory.appendingPathComponent("Artwork Index.json"), options: .atomic)
+    }
+    private func removeUnreferenced(_ filenames: [String], mappings: [String: String]) {
+        let retained = Set(mappings.values)
+        for filename in Set(filenames) where !retained.contains(filename) {
+            if let url = files.existingURL(filename) { try? FileManager.default.removeItem(at: url) }
+        }
     }
     func image(for key: String, kind: Kind, mode: String = "bigPicture") -> UIImage? {
         let id = mode + ":" + kind.rawValue + ":" + key
         if let cached = cache[id] { return cached }
-        guard let filename = mappings[id] ?? (mode == "bigPicture" ? mappings[kind.rawValue + ":" + key] : nil), let image = UIImage(contentsOfFile: directory.appendingPathComponent(filename).path) else { return nil }
+        guard let filename = mappings[id] ?? (mode == "bigPicture" ? mappings[kind.rawValue + ":" + key] : nil), let url = files.existingURL(filename), let image = UIImage(contentsOfFile: url.path) else { return nil }
         cache[id] = image; return image
     }
     func save(_ image: UIImage, for key: String, kind: Kind, mode: String = "bigPicture") throws {
@@ -23,15 +42,18 @@ final class LiveBoardArtworkStore: ObservableObject {
         let format = UIGraphicsImageRendererFormat(); format.scale = 1
         let resized = UIGraphicsImageRenderer(size: size, format: format).image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
         guard let data = resized.jpegData(compressionQuality: 0.9) else { throw CocoaError(.fileWriteUnknown) }
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try files.prepare()
         let id = mode + ":" + kind.rawValue + ":" + key
-        let filename = UUID().uuidString + ".jpg"
-        try data.write(to: directory.appendingPathComponent(filename), options: .atomic)
+        guard let folder = LiveBoardArtworkFiles.folder(mode: mode, kind: kind.rawValue) else { throw CocoaError(.fileWriteInvalidFileName) }
+        let filename = folder + "/" + LiveBoardArtworkFiles.filename(key: key)
+        guard let url = files.visibleURL(filename) else { throw CocoaError(.fileWriteInvalidFileName) }
+        try data.write(to: url, options: .atomic)
         var map = mappings
         var previousFiles = [map[id]].compactMap { $0 }
         if mode == "bigPicture", let legacy = map.removeValue(forKey: kind.rawValue + ":" + key) { previousFiles.append(legacy) }
-        for previous in Set(previousFiles) { try? FileManager.default.removeItem(at: directory.appendingPathComponent(previous)) }
         map[id] = filename; defaults.set(map, forKey: "LiveBoardConsoleArtwork")
+        removeUnreferenced(previousFiles, mappings: map)
+        writeIndex()
         cache[id] = resized; revision += 1
     }
     func remove(for key: String, kind: Kind, mode: String = "bigPicture") {
@@ -39,7 +61,9 @@ final class LiveBoardArtworkStore: ObservableObject {
         var map = mappings
         var removed = [map.removeValue(forKey: id)].compactMap { $0 }
         if mode == "bigPicture", let legacy = map.removeValue(forKey: kind.rawValue + ":" + key) { removed.append(legacy) }
-        for filename in Set(removed) { try? FileManager.default.removeItem(at: directory.appendingPathComponent(filename)) }
-        defaults.set(map, forKey: "LiveBoardConsoleArtwork"); cache[id] = nil; revision += 1
+        defaults.set(map, forKey: "LiveBoardConsoleArtwork")
+        removeUnreferenced(removed, mappings: map)
+        writeIndex()
+        cache[id] = nil; revision += 1
     }
 }

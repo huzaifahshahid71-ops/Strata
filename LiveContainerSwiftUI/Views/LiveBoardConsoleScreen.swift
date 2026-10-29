@@ -8,6 +8,9 @@ struct LiveBoardConsoleScreen: View {
     let openInterface: () -> Void
     let openManagement: () -> Void
     var launchWithJIT: ((LCAppModel) async -> Void)? = nil
+    var launchInGameMode: ((LCAppModel) async -> Void)? = nil
+    var launchWithMetalHUD: ((LCAppModel) async -> Void)? = nil
+    var launchMultitask: ((LCAppModel) async -> Void)? = nil
     @ObservedObject private var appCustomization = LiveBoardAppCustomization.shared
     @State private var appearanceApp: LiveBoardAppearanceSelection?
     @AppStorage("StrataConsoleLayouts", store: LCUtils.appGroupUserDefault) private var savedConsoleLayouts = "{}"
@@ -25,6 +28,7 @@ struct LiveBoardConsoleScreen: View {
     @AppStorage("darkModeIcon", store: LCUtils.appGroupUserDefault) private var darkIcons = false
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var consoleVisible = false
     @StateObject private var controller = LiveBoardControllerInput()
     @StateObject private var artwork = LiveBoardArtworkStore()
     @AppStorage("LiveBoardModeLibraries", store: LCUtils.appGroupUserDefault) private var modeLibraries = "{}"
@@ -155,13 +159,15 @@ struct LiveBoardConsoleScreen: View {
         } message: { Text(artworkError ?? "") }
         .onReceive(NotificationCenter.default.publisher(for: LiveBoardControllerInput.pauseNotification)) { _ in controller.stop() }
         .onReceive(NotificationCenter.default.publisher(for: LiveBoardControllerInput.resumeNotification)) { _ in bindController() }
-        .onAppear { migrateLibrariesIfNeeded(); bindController() }
+        .onAppear { consoleVisible = true; launchReturned = false; migrateLibrariesIfNeeded(); bindController() }
+        .task { await Task.yield(); bindController() }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in artwork.reloadFromDisk(); bindController() }
         .onChange(of: navigation.selectedIndex) { _ in if sounds && scenePhase == .active { audio.play() } }
-        .onDisappear { controller.stop(); audio.stop() }
+        .onDisappear { consoleVisible = false; controller.stop(); audio.stop() }
         .onChange(of: scenePhase) { phase in
             if phase == .active { bindController() } else { controller.stop() }
         }
-        .onChange(of: mode) { _ in activeCategory = nil; favoritesOnly = false; navigation = LiveBoardConsoleNavigation() }
+        .onChange(of: mode) { _ in activeCategory = nil; favoritesOnly = false; navigation = LiveBoardConsoleNavigation(); bindController() }
         .onChange(of: keys) { _ in navigation.selectedIndex = min(navigation.selectedIndex, max(0, visibleApps.count - 1)) }
     }
 
@@ -284,6 +290,14 @@ struct LiveBoardConsoleScreen: View {
                         }
                         .buttonStyle(.plain)
                         .id(liveBoardAppKey(app))
+                        .contextMenu {
+                            Button("Request Game Mode", systemImage: "gamecontroller.fill") { navigation.selectedIndex = index; activate(app, gameMode: true) }
+                            Button("Launch with JIT", systemImage: "bolt.fill") { navigation.selectedIndex = index; activate(app, forceJIT: true) }
+                            if let launchMultitask { Button("Multitask", systemImage: "rectangle.on.rectangle") { Task { await launchMultitask(app) } } }
+                            if let launchWithMetalHUD { Button("Launch with Metal HUD", systemImage: "gauge.with.dots.needle.67percent") { Task { await launchWithMetalHUD(app) } } }
+                            Button(app.strataSwitcherPinned ? "Unpin from app switcher" : "Pin to app switcher", systemImage: "pin") { app.strataSwitcherPinned.toggle() }
+                            Button("App options", systemImage: "ellipsis") { navigation.selectedIndex = index; showDetails() }
+                        }
                         .accessibilityLabel(appCustomization.name(app))
                         .accessibilityValue(focused ? "Selected" : "")
                         .accessibilityIdentifier("console.tile.\(liveBoardAppKey(app))")
@@ -417,11 +431,11 @@ struct LiveBoardConsoleScreen: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         VStack(spacing: 4) {
-                            ForEach((0..<10).filter { bigPicture || $0 != 6 }, id: \.self) { index in
+                            ForEach((0..<11).filter { bigPicture || $0 != 6 }, id: \.self) { index in
                                 Button { detailAction(index, app: app) } label: {
                                     HStack(spacing: 10) {
-                                        Image(systemName: ["play.fill", "gearshape", "photo", "rectangle", "star", "arrow.counterclockwise", "rectangle.portrait", "eye.slash", "bolt.fill", "pencil"][index]).frame(width: 24)
-                                        Text(["Launch", "App settings", "Choose landscape cover", "Choose background", favoriteKeys.contains(liveBoardAppKey(app)) ? "Remove favorite" : "Add favorite", "Reset artwork", "Choose portrait cover", "Hide in this mode", "Launch with JIT", "Rename / change app icon"][index]).font(.system(size: 15))
+                                        Image(systemName: ["play.fill", "gearshape", "photo", "rectangle", "star", "arrow.counterclockwise", "rectangle.portrait", "eye.slash", "bolt.fill", "pencil", "gamecontroller.fill"][index]).frame(width: 24)
+                                        Text(["Launch", "App settings", "Choose landscape cover", "Choose background", favoriteKeys.contains(liveBoardAppKey(app)) ? "Remove favorite" : "Add favorite", "Reset artwork", "Choose portrait cover", "Hide in this mode", "Launch with JIT", "Rename / change app icon", "Request Game Mode"][index]).font(.system(size: 15))
                                         Spacer(minLength: 0)
                                     }.padding(10).frame(minHeight: 40).background(detailsIndex == index ? .white.opacity(0.17) : .clear, in: RoundedRectangle(cornerRadius: 10))
                                 }.buttonStyle(.plain).id(index).accessibilityIdentifier("console.option.\(index)")
@@ -473,6 +487,7 @@ struct LiveBoardConsoleScreen: View {
             details = false; controller.stop()
             picker = ArtworkRequest(key: liveBoardAppKey(app), kind: index == 2 ? .cover : (index == 6 ? .portrait : .background))
         case 8: details = false; activate(app, forceJIT: true)
+        case 10: details = false; activate(app, gameMode: true)
         case 9: details = false; controller.stop(); appearanceApp = LiveBoardAppearanceSelection(app: app)
         case 4: favorite(app)
         case 7: updateLibrary { $0.hidden.insert(liveBoardAppKey(app)) }; details = false
@@ -483,14 +498,15 @@ struct LiveBoardConsoleScreen: View {
         default: break
         }
     }
-    private func activate(_ app: LCAppModel, forceJIT: Bool = false) {
+    private func activate(_ app: LCAppModel, forceJIT: Bool = false, gameMode: Bool = false) {
         guard !launching, !movingLaunchButton else { return }
         let launcherWindow = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
             .flatMap { $0.windows }.first { $0.isKeyWindow }
         LiveBoardOrientation.setLandscape(false, window: launcherWindow)
         controller.stop(); audio.stop(); launching = true
         Task { @MainActor in
-            if forceJIT, let launchWithJIT { await launchWithJIT(app) } else { await launch(app) }
+            if gameMode, let launchInGameMode { await launchInGameMode(app) }
+            else if forceJIT, let launchWithJIT { await launchWithJIT(app) } else { await launch(app) }
             launching = false
             // Do not reclaim the gamepad after a guest starts in-process.
             // Scene reactivation or an explicit touch resumes launcher input after a canceled launch.
@@ -498,7 +514,7 @@ struct LiveBoardConsoleScreen: View {
         }
     }
     private func bindController() {
-        guard scenePhase == .active, !searching, !managingCategories, !jitSetup, !layoutSettings, !movingLaunchButton, appearanceApp == nil, picker == nil, artworkError == nil, !launching else { return }
+        guard consoleVisible, (scenePhase == .active || UIApplication.shared.applicationState == .active), !searching, !managingCategories, !jitSetup, !layoutSettings, !movingLaunchButton, appearanceApp == nil, picker == nil, artworkError == nil, !launching else { return }
         controller.onCommand = { command in handle(command) }
         controller.start()
     }
@@ -507,7 +523,7 @@ struct LiveBoardConsoleScreen: View {
         if details {
             switch command {
             case .up: detailsIndex = max(0, detailsIndex - 1); if !bigPicture && detailsIndex == 6 { detailsIndex = 5 }
-            case .down: detailsIndex = min(9, detailsIndex + 1); if !bigPicture && detailsIndex == 6 { detailsIndex = 7 }
+            case .down: detailsIndex = min(10, detailsIndex + 1); if !bigPicture && detailsIndex == 6 { detailsIndex = 7 }
             case .confirm: if let app = selected { detailAction(detailsIndex, app: app) }
             case .back, .details: details = false
             default: break

@@ -15,6 +15,7 @@
 @property(nonatomic) CGRect originalFrame;
 @property(nonatomic) UIBarButtonItem *maximizeButton;
 @property(nonatomic) bool isAppTerminationRequested;
+@property(nonatomic) UIInterfaceOrientationMask guestOrientationMask;
 @end
 
 @implementation DecoratedAppSceneViewController
@@ -22,6 +23,9 @@
     return [self initWindowName:windowName bundleId:bundleId dataUUID:dataUUID rootVC:rootVC fullScreen:NO];
 }
 - (instancetype)initWindowName:(NSString*)windowName bundleId:(NSString*)bundleId dataUUID:(NSString*)dataUUID rootVC:(UIViewController*)rootVC fullScreen:(BOOL)fullScreen {
+    return [self initWindowName:windowName bundleId:bundleId dataUUID:dataUUID rootVC:rootVC fullScreen:fullScreen jitToken:nil];
+}
+- (instancetype)initWindowName:(NSString*)windowName bundleId:(NSString*)bundleId dataUUID:(NSString*)dataUUID rootVC:(UIViewController*)rootVC fullScreen:(BOOL)fullScreen jitToken:(NSString*)jitToken {
     self = [super initWithNibName:nil bundle:nil];
     self.view = [[UIStackView alloc] initWithFrame:self.view.frame];
     [MultitaskDockManager.shared.windowHostingView addSubview:self.view];
@@ -29,8 +33,29 @@
     
     _dataUUID = dataUUID;
     _scaleRatio = 1.0;
+    _immersiveRequested = fullScreen;
+    _guestOrientationMask = UIInterfaceOrientationMaskAllButUpsideDown;
+    if (fullScreen) {
+        BOOL shared = NO;
+        NSBundle *guestBundle = [LCSharedUtils findBundleWithBundleId:bundleId isSharedAppOut:&shared];
+        NSArray *orientations = [guestBundle objectForInfoDictionaryKey:UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad ? @"UISupportedInterfaceOrientations~ipad" : @"UISupportedInterfaceOrientations"];
+        if (!orientations) orientations = [guestBundle objectForInfoDictionaryKey:@"UISupportedInterfaceOrientations"];
+        UIInterfaceOrientationMask mask = 0;
+        for (NSString *orientation in orientations) {
+            if ([orientation isEqual:@"UIInterfaceOrientationPortrait"]) mask |= UIInterfaceOrientationMaskPortrait;
+            if ([orientation isEqual:@"UIInterfaceOrientationLandscapeLeft"]) mask |= UIInterfaceOrientationMaskLandscapeLeft;
+            if ([orientation isEqual:@"UIInterfaceOrientationLandscapeRight"]) mask |= UIInterfaceOrientationMaskLandscapeRight;
+            if ([orientation isEqual:@"UIInterfaceOrientationPortraitUpsideDown"]) mask |= UIInterfaceOrientationMaskPortraitUpsideDown;
+        }
+        if (mask) _guestOrientationMask = mask;
+    }
     _isMaximized = fullScreen || [NSUserDefaults.lcUserDefaults boolForKey:@"LCLaunchMultitaskMaximized"];
-    _appSceneVC = [[AppSceneViewController alloc] initWithBundleId:bundleId dataUUID:dataUUID delegate:self];
+    _appSceneVC = [[AppSceneViewController alloc] initWithBundleId:bundleId dataUUID:dataUUID delegate:self jitToken:jitToken];
+    if (!_appSceneVC) {
+        [self.view removeFromSuperview];
+        [self removeFromParentViewController];
+        return self;
+    }
     self.title = windowName;
     [self setupDecoratedView];
     
@@ -95,6 +120,47 @@
     });
 
     return self;
+}
+
+
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+    return self.immersivePresented ? self.guestOrientationMask : UIInterfaceOrientationMaskAllButUpsideDown;
+}
+- (BOOL)prefersStatusBarHidden { return self.immersivePresented; }
+- (BOOL)prefersHomeIndicatorAutoHidden { return self.immersivePresented; }
+- (void)presentImmersiveFrom:(UIViewController *)presenter {
+    if (!self.immersiveRequested || self.immersivePresented || !self.appSceneVC.isAppRunning) return;
+    self.immersivePresented = YES;
+    [self willMoveToParentViewController:nil];
+    [self.view removeFromSuperview];
+    [self removeFromParentViewController];
+    self.view.transform = CGAffineTransformIdentity;
+    self.view.layer.cornerRadius = 0;
+    self.view.layer.borderWidth = 0;
+    self.view.hidden = NO;
+    self.view.alpha = 1;
+    self.view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    self.modalPresentationStyle = UIModalPresentationFullScreen;
+    MultitaskDockManager.shared.immersiveGuestActive = YES;
+    [NSNotificationCenter.defaultCenter postNotificationName:@"LiveBoardPauseController" object:nil];
+    [self updateVerticalConstraints];
+    [presenter presentViewController:self animated:NO completion:^{
+        [self setNeedsStatusBarAppearanceUpdate];
+        [self setNeedsUpdateOfHomeIndicatorAutoHidden];
+        [self setNeedsUpdateOfSupportedInterfaceOrientations];
+        [self.view.window.windowScene requestGeometryUpdateWithPreferences:[[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:self.guestOrientationMask] errorHandler:^(NSError *error) {}];
+        [self.appSceneVC updateFrameWithSettingsBlock:nil];
+    }];
+}
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    if (self.immersivePresented) {
+        self.resizeHandle.hidden = YES;
+        [self.appSceneVC updateFrameWithSettingsBlock:^(UIMutableApplicationSceneSettings *settings) {
+            settings.peripheryInsets = self.view.safeAreaInsets;
+            settings.safeAreaInsetsPortrait = LCUIEdgeInsetsRotateToOrientation(self.view.safeAreaInsets, self.view.window.windowScene.interfaceOrientation);
+        }];
+    }
 }
 
 - (void)setupDecoratedView {
@@ -252,6 +318,19 @@
 }
 
 - (void)minimizeWindow {
+    if (self.immersivePresented) {
+        UIViewController *root = self.presentingViewController;
+        [self dismissViewControllerAnimated:NO completion:^{
+            self.immersivePresented = NO;
+            MultitaskDockManager.shared.immersiveGuestActive = NO;
+            [MultitaskDockManager.shared.windowHostingView addSubview:self.view];
+            [root addChildViewController:self];
+            [self didMoveToParentViewController:root];
+            self.view.hidden = YES;
+            [NSNotificationCenter.defaultCenter postNotificationName:@"LiveBoardResumeController" object:nil];
+        }];
+        return;
+    }
     if (self.view.hidden) return;
     [UIView animateWithDuration:0.3 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
         self.view.alpha = 0;
@@ -327,6 +406,15 @@
 }
 
 - (void)appSceneVCAppDidExit:(AppSceneViewController*)vc {
+    if (self.immersivePresented) {
+        self.immersivePresented = NO;
+        [MultitaskDockManager.shared removeRunningApp:self.dataUUID];
+        [self dismissViewControllerAnimated:NO completion:^{
+            MultitaskDockManager.shared.immersiveGuestActive = NO;
+            [NSNotificationCenter.defaultCenter postNotificationName:@"LiveBoardResumeController" object:nil];
+        }];
+        return;
+    }
     BOOL skipTerminationScreen = [NSUserDefaults.lcSharedDefaults boolForKey:@"LCSkipTerminatedScreen"];
     BOOL isManual = _isAppTerminationRequested;
     if(isManual || skipTerminationScreen) {
@@ -358,6 +446,11 @@
 - (void)appSceneVC:(AppSceneViewController*)vc didInitializeWithError:(NSError *)error {
     dispatch_async(dispatch_get_main_queue(), ^{
         if(error) {
+            if (self.pidAvailableHandler) {
+                void (^handler)(NSNumber *, NSError *) = self.pidAvailableHandler;
+                self.pidAvailableHandler = nil;
+                handler(nil, error);
+            }
             [vc appTerminationCleanUp];
             UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"lc.common.error".loc message:error.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
             [alert addAction:[UIAlertAction actionWithTitle:@"lc.common.ok".loc style:UIAlertActionStyleCancel handler:nil]];
@@ -369,7 +462,9 @@
             self.pid = vc.pid;
             [self updateOriginalFrame];
             if (self.pidAvailableHandler) {
-                self.pidAvailableHandler(@(self.pid), nil);
+                void (^handler)(NSNumber *, NSError *) = self.pidAvailableHandler;
+                self.pidAvailableHandler = nil;
+                handler(@(self.pid), nil);
             }
         }
     });
@@ -494,7 +589,7 @@
     [self.view layoutIfNeeded];
     [UIView animateWithDuration:0.3 animations:^{
         BOOL bottomWindowBar = [NSUserDefaults.lcSharedDefaults boolForKey:@"LCMultitaskBottomWindowBar"];
-        BOOL hideWindowBar = MultitaskDockManager.shared.isCollapsed && self.isMaximized;
+        BOOL hideWindowBar = self.immersiveRequested || (MultitaskDockManager.shared.isCollapsed && self.isMaximized);
         CGFloat navBarHeight = hideWindowBar ? 0 : 44;
         self.navigationBar.alpha = hideWindowBar ? 0 : 1;
         self.navigationBar.hidden = hideWindowBar;
@@ -562,6 +657,7 @@
 }
 
 - (void)updateMaximizedFrameWithSettings:(UIMutableApplicationSceneSettings *)settings {
+    if (self.immersivePresented) { return; }
     CGRect maxFrame = UIEdgeInsetsInsetRect(self.view.window.frame, [self updateMaximizedSafeAreaWithSettings:settings]);
     self.view.frame = maxFrame;
 }

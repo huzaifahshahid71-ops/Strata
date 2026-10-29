@@ -130,7 +130,17 @@ class AppInfoProvider {
 @objc public class MultitaskDockManager: NSObject, ObservableObject {
     @objc public static let shared = MultitaskDockManager()
     
-    @Published var apps: [DockAppModel] = []
+    @Published var apps: [DockAppModel] = [] { didSet { DispatchQueue.main.async { StrataControlsLibrary.refreshRunning() } } }
+    private var controlsRequested = false
+    private var controlsGestures: [UITapGestureRecognizer] = []
+    private var lastControlsRequest = ""
+    @objc public static var immersiveOrientationActive = false
+    @Published @objc public var immersiveGuestActive = false {
+        didSet {
+            Self.immersiveOrientationActive = immersiveGuestActive
+            hostingController?.view.isHidden = immersiveGuestActive || !controlsRequested
+        }
+    }
     @Published var isVisible: Bool = false
     @Published @objc var isCollapsed: Bool = false
     @Published var isDockHidden: Bool = false
@@ -207,6 +217,7 @@ class AppInfoProvider {
     
     // Calculate adaptive dock width (auto-adjust when exceeding safe area)
     public var dockWidth: CGFloat {
+        if controlsRequested { return max(88, min(originalDockWidth, 110)) }
         guard !apps.isEmpty else { return originalDockWidth }
         
         let totalVerticalMargin = Constants.adaptiveWidthVerticalMargin * 2
@@ -286,8 +297,17 @@ class AppInfoProvider {
     
     override init() {
         super.init()
+        NotificationCenter.default.addObserver(forName: Notification.Name("StrataMinimizeAllWindows"), object: nil, queue: .main) { [weak self] _ in self?.minimizeAllWindows() }
         keyWindow!.rootViewController!.view.subviews.first!.addSubview(self.windowHostingView)
         setupDockView()
+        let observer = Unmanaged.passUnretained(self).toOpaque()
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), observer, { _, pointer, _, _, _ in
+            guard let pointer else { return }
+            let manager = Unmanaged<MultitaskDockManager>.fromOpaque(pointer).takeUnretainedValue()
+            DispatchQueue.main.async { manager.consumeGuestControlsRequest() }
+        }, "com.strata.controls.request" as CFString, nil, .deliverImmediately)
+        NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in self?.installControlsGesture() }
+        DispatchQueue.main.async { self.installControlsGesture() }
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(userDefaultsDidChange),
@@ -332,6 +352,7 @@ class AppInfoProvider {
             self.hostingController = UIHostingController(rootView: dockView)
             self.hostingController?.view.autoresizingMask = [.flexibleTopMargin, .flexibleLeftMargin, .flexibleRightMargin, .flexibleBottomMargin]
             self.hostingController?.view.backgroundColor = .clear
+            self.hostingController?.view.isHidden = !self.controlsRequested
         }
     }
 
@@ -362,6 +383,7 @@ class AppInfoProvider {
     // MARK: - Frame Calculation Helpers
 
     private func calculateTargetDockHeight(forWidth width: CGFloat) -> CGFloat {
+        if controlsRequested { return min(safeAreaHeight * 0.75, CGFloat(max(1, libraryEntries.count)) * (adaptiveIconSize + 12) + 100) }
         if isCollapsed {
             let collapsedHeight = collapsedDockHeight(for: width)
             return max(Constants.minCollapsedHeight, collapsedHeight)
@@ -447,12 +469,14 @@ class AppInfoProvider {
     }
     
     @objc public func showDock() {
-        guard isDockEnabled() else { return }
+        guard isDockEnabled(), controlsRequested, !immersiveGuestActive else { return }
         guard !isVisible, let hostingController = hostingController else { return }
         
         guard let keyWindow = self.keyWindow else { return }
         
         DispatchQueue.main.async {
+            guard self.controlsRequested, !self.immersiveGuestActive else { return }
+            self.hostingController?.view.isHidden = false
             self.isVisible = true
             
             let screenBounds = keyWindow.bounds
@@ -596,7 +620,9 @@ class AppInfoProvider {
         for window in windowScene.windows {
             if let targetView = findMultitaskView(in: window, withUUID: uuid) {
                 passURLSchemeToView(targetView)
-                animateViewAppearance(targetView, from: center, in: window)
+                if let vc = targetView._viewDelegate() as? DecoratedAppSceneViewController, vc.immersiveRequested, !vc.immersivePresented, let root = window.rootViewController {
+                    hideControls(); vc.presentImmersive(from: root)
+                } else { animateViewAppearance(targetView, from: center, in: window) }
                 return true
             }
         }
@@ -728,14 +754,73 @@ class AppInfoProvider {
         }
     }
     
-    @objc public func toggleDockCollapse() {
-        DispatchQueue.main.async {
-            self.isCollapsed.toggle()
-            self.updateDockFrame()
-            self.notifyDockCollapseChanged()
+    @objc public func toggleDockCollapse() { hideControls() }
+    @objc public func hideControls() {
+        controlsRequested = false
+        isVisible = false
+        hostingController?.view.isHidden = true
+    }
+    @Published var libraryEntries: [StrataControlsLibrary.Entry] = []
+    private func revealControls() {
+        Task { @MainActor in StrataControlsLibrary.refreshRunning(); LCUtils.strataToggleAppSwitcher() }
+    }
+    @objc private func controlsTap(_ gesture: UITapGestureRecognizer) {
+        // The injected controls handle taps delivered inside a hosted guest.
+        guard !apps.contains(where: { $0.view?.isHidden == false }) else { return }
+        if controlsRequested { hideControls() } else { revealControls() }
+    }
+    private func installControlsGesture() {
+        for scene in UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }) {
+            for window in scene.windows where window.isKeyWindow {
+                guard !controlsGestures.contains(where: { $0.view === window }) else { continue }
+                let tap = UITapGestureRecognizer(target: self, action: #selector(controlsTap(_:)))
+                tap.numberOfTouchesRequired = 3; tap.cancelsTouchesInView = false; tap.delaysTouchesBegan = false
+                window.addGestureRecognizer(tap); controlsGestures.append(tap)
+            }
         }
     }
-    
+    func closeApp(_ app: DockAppModel) {
+        hideControls()
+        if let vc = app.view?._viewDelegate() as? DecoratedAppSceneViewController { vc.closeWindow() }
+    }
+    @objc public func closeAppFromControls(uuid: String) {
+        for app in apps where app.appUUID == uuid {
+            (app.view?._viewDelegate() as? DecoratedAppSceneViewController)?.closeWindow()
+        }
+    }
+
+    private func consumeGuestControlsRequest() {
+        guard let group = LCSharedUtils.appGroupID(), let root = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group),
+              let data = try? Data(contentsOf: root.appendingPathComponent("Library/StrataControls/request.json")),
+              let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let command = StrataControlsRequest(request, now: Date().timeIntervalSince1970, previousID: lastControlsRequest) else { return }
+        lastControlsRequest = command.id
+        let pid = command.pid, action = command.action
+        for app in apps {
+            guard let vc = app.view?._viewDelegate() as? DecoratedAppSceneViewController, vc.appSceneVC.pid == Int32(pid) else { continue }
+            hideControls()
+            if action == "close" { vc.closeWindow() }
+            else {
+                vc.minimizeWindow()
+                if action == "library" { DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    if let group = LCSharedUtils.appGroupID(), let root = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group), FileManager.default.fileExists(atPath: root.appendingPathComponent("Library/StrataControls/switch.json").path) {
+                        NotificationCenter.default.post(name: Notification.Name("StrataLaunchFromControls"), object: nil)
+                    } else { self.revealControls() }
+                } }
+            }
+            return
+        }
+        if #available(iOS 16.1, *), let vc = MultitaskWindowManager.guestControllers.object(forKey: NSNumber(value: pid)) {
+            if action == "close" {
+                vc.terminate()
+                if let session = vc.view.window?.windowScene?.session { UIApplication.shared.requestSceneSessionDestruction(session, options: nil, errorHandler: nil) }
+            } else if let current = vc.view.window?.windowScene,
+                      let launcher = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first(where: { $0 !== current }) {
+                UIApplication.shared.requestSceneSessionActivation(launcher.session, userActivity: nil, options: nil, errorHandler: nil)
+            }
+        }
+    }
+
     @objc public func notifyDockCollapseChanged() {
         self.updateDockFrame()
         // find fullscreen apps and hide its UINavigationBar
@@ -772,24 +857,10 @@ class AppInfoProvider {
     
     // Add edge gesture recognition areas when dock is hidden
     private func setupEdgeGestureRecognizers() {
-        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-              let keyWindow = windowScene.windows.first else { return }
-        
-        keyWindow.gestureRecognizers?.removeAll { gesture in
-            return gesture is UITapGestureRecognizer || gesture is UIScreenEdgePanGestureRecognizer
-        }
-        
-        if isDockHidden {
-            let leftEdgeGesture = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(handleEdgeSwipe(_:)))
-            leftEdgeGesture.edges = .left
-            keyWindow.addGestureRecognizer(leftEdgeGesture)
-            
-            let rightEdgeGesture = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(handleEdgeSwipe(_:)))
-            rightEdgeGesture.edges = .right
-            keyWindow.addGestureRecognizer(rightEdgeGesture)
-        }
+        // Only our explicit three-finger gesture reveals controls; never remove game gestures.
+        installControlsGesture()
     }
-    
+
     @objc private func handleEdgeSwipe(_ gesture: UIScreenEdgePanGestureRecognizer) {
         guard isDockHidden, gesture.state == .began || gesture.state == .changed else {
             return
@@ -845,9 +916,22 @@ public struct MultitaskDockSwiftView: View {
                                 dockManager.minimizeAllWindows()
                             }
                         
-                        ForEach(dockManager.apps) { app in
-                            AppIconView(app: app)
+                        ScrollView(.vertical, showsIndicators: false) {
+                            LazyVStack(spacing: 12) {
+                                ForEach(dockManager.libraryEntries) { entry in
+                                    Button { dockManager.hideControls(); StrataControlsLibrary.select(entry.id) } label: {
+                                        Group { if let image = entry.icon { Image(uiImage: image).resizable().scaledToFill() } else { Image(systemName: "app").resizable().scaledToFit() } }
+                                            .frame(width: dockManager.adaptiveIconSize, height: dockManager.adaptiveIconSize)
+                                            .clipShape(RoundedRectangle(cornerRadius: 15))
+                                    }.buttonStyle(.plain).accessibilityLabel(entry.name)
+                                        .contextMenu {
+                                            Button("Open app", systemImage: "play") { dockManager.hideControls(); StrataControlsLibrary.select(entry.id) }
+                                            Button("Close app", systemImage: "xmark.circle", role: .destructive) { dockManager.hideControls(); StrataControlsLibrary.select(entry.id, close: true) }
+                                        }
+                                }
+                            }.padding(.vertical, 4)
                         }
+
                     }
                 }
             }

@@ -5,6 +5,8 @@
 //  Created by s s on 2025/5/17.
 //
 #import "AppSceneViewController.h"
+#import "StrataGuestAcknowledgement.h"
+#import "../LiveContainer/StrataRuntimePath.h"
 #import "DecoratedAppSceneViewController.h"
 #import "LiveContainerSwiftUI-Swift.h"
 #import "../LiveContainerSwiftUI/Utilities/LCUtils.h"
@@ -16,6 +18,8 @@
 
 @interface AppSceneViewController()
 @property int resizeDebounceToken;
+@property(nonatomic) NSString *strataJITToken;
+@property(nonatomic) NSURL *strataJITRecordURL;
 @property CFTimeInterval lastResizeRequestTime;
 @property CGPoint normalizedOrigin;
 @property bool isNativeWindow;
@@ -33,6 +37,9 @@
 
 
 - (instancetype)initWithBundleId:(NSString*)bundleId dataUUID:(NSString*)dataUUID delegate:(id<AppSceneViewControllerDelegate>)delegate {
+    return [self initWithBundleId:bundleId dataUUID:dataUUID delegate:delegate jitToken:nil];
+}
+- (instancetype)initWithBundleId:(NSString*)bundleId dataUUID:(NSString*)dataUUID delegate:(id<AppSceneViewControllerDelegate>)delegate jitToken:(NSString*)jitToken {
     self = [super initWithNibName:nil bundle:nil];
     self.delegate = delegate;
     self.dataUUID = dataUUID;
@@ -63,6 +70,7 @@
         @"selectedContainer": _dataUUID,
         @"bookmarks": bookmarks,
         @"lcHomePath": NSHomeDirectory(),
+        @"strataDiagnosticsGroup": [LCSharedUtils appGroupID] ?: @"",
     }.mutableCopy;
     
     NSString* launchAppUrlScheme = [NSUserDefaults.standardUserDefaults stringForKey:@"launchAppUrlScheme"];
@@ -90,24 +98,62 @@
             [bookmarks addObject:[tweaksURL bookmarkDataWithOptions:(1<<11) includingResourceValuesForKeys:0 relativeToURL:0 error:0]];
         }
     }
+    // The translation runtime is a separate app bundle and needs its own sandbox grant.
+    bool guestShared = false;
+    NSBundle *guest = [LCSharedUtils findBundleWithBundleId:bundleId isSharedAppOut:&guestShared];
+    NSDictionary *guestInfo = [NSDictionary dictionaryWithContentsOfURL:[guest.bundleURL URLByAppendingPathComponent:@"LCAppInfo.plist"]];
+    if ([guestInfo[@"is32bit"] boolValue]) {
+        NSString *runtimeName = guestInfo[@"selected32BitEmulator"];
+        if (!runtimeName.length) runtimeName = [NSUserDefaults.lcSharedDefaults stringForKey:@"LCSelected32BitEmulator"];
+        bool runtimeShared = false;
+        NSBundle *runtime = StrataFind32BitRuntime(runtimeName, docURL, [LCSharedUtils appGroupPath]);
+        if (!runtime.executablePath || ![NSFileManager.defaultManager isReadableFileAtPath:runtime.executablePath]) {
+            [delegate appSceneVC:self didInitializeWithError:[NSError errorWithDomain:@"StrataRuntime" code:1 userInfo:@{NSLocalizedDescriptionKey:@"The selected 32-bit runtime is unavailable. Return to Apps and install LiveExec32 before launching."}]];
+            return nil;
+        }
+        NSError *bookmarkError;
+        NSData *runtimeBookmark = [runtime.bundleURL bookmarkDataWithOptions:(1<<11) includingResourceValuesForKeys:nil relativeToURL:nil error:&bookmarkError];
+        if (!runtimeBookmark) {
+            [delegate appSceneVC:self didInitializeWithError:bookmarkError ?: [NSError errorWithDomain:@"StrataRuntime" code:2 userInfo:@{NSLocalizedDescriptionKey:@"Cannot grant the guest access to LiveExec32."}]];
+            return nil;
+        }
+        [bookmarks addObject:runtimeBookmark];
+        userInfo[@"strataRuntimeName"] = runtimeName;
+    }
+    self.strataJITToken = jitToken;
+    if (jitToken) {
+        userInfo[@"strataJITToken"] = jitToken;
+        userInfo[@"strataJITGroup"] = [LCSharedUtils appGroupID];
+        NSURL *root = [NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:[LCSharedUtils appGroupID]];
+        self.strataJITRecordURL = [root URLByAppendingPathComponent:[NSString stringWithFormat:@"Library/StrataJITGuest/%@.json", jitToken]];
+    }
     item.userInfo = userInfo;
     
     __weak typeof(self) weakSelf = self;
     [_extension setRequestCancellationBlock:^(NSUUID *uuid, NSError *error) {
+        [weakSelf recordStrataJITExit:error.localizedDescription ?: @"Guest extension cancelled."];
         [weakSelf appTerminationCleanUp];
         [weakSelf.delegate appSceneVC:weakSelf didInitializeWithError:error];
     }];
     [_extension setRequestInterruptionBlock:^(NSUUID *uuid) {
+        [weakSelf recordStrataJITExit:@"Guest extension interrupted before or after JIT startup."];
         [weakSelf appTerminationCleanUp];
+        if (weakSelf.strataJITToken) {
+            [weakSelf.delegate appSceneVC:weakSelf didInitializeWithError:[NSError errorWithDomain:@"StrataJITGuest" code:3 userInfo:@{NSLocalizedDescriptionKey:@"Guest extension interrupted during JIT startup."}]];
+        }
     }];
     [_extension beginExtensionRequestWithInputItems:@[item] completion:^(NSUUID *identifier) {
         if(identifier) {
             [MultitaskManager registerMultitaskContainerWithContainer:self.dataUUID];
             self.identifier = identifier;
             self.pid = [self.extension pidForRequestIdentifier:self.identifier];
-            [delegate appSceneVC:self didInitializeWithError:nil];
             dispatch_async(dispatch_get_main_queue(), ^{
-                [self setUpAppPresenter];
+                if (self.strataJITToken) {
+                    [self awaitStrataJITGuestUntil:NSProcessInfo.processInfo.systemUptime + 15.0];
+                } else {
+                    [delegate appSceneVC:self didInitializeWithError:nil];
+                    [self setUpAppPresenter];
+                }
             });
         } else {
             NSError* error = [NSError errorWithDomain:@"LiveProcess" code:2 userInfo:@{NSLocalizedDescriptionKey: @"Failed to start app. Child process has unexpectedly crashed"}];
@@ -116,6 +162,63 @@
     }];
     
     return self;
+}
+
+- (void)recordStrataJITExit:(NSString *)message {
+    if (!self.strataJITRecordURL) return;
+    NSData *data = [NSData dataWithContentsOfURL:self.strataJITRecordURL];
+    NSMutableDictionary *record = data ? [[NSJSONSerialization JSONObjectWithData:data options:0 error:nil] mutableCopy] : nil;
+    if (!record) record = [@{@"token":self.strataJITToken, @"pid":@(self.pid), @"revision":@12} mutableCopy];
+    record[@"stage"] = @"failed";
+    record[@"message"] = message;
+    record[@"timestamp"] = @([NSDate.date timeIntervalSince1970]);
+    NSData *encoded = [NSJSONSerialization dataWithJSONObject:record options:0 error:nil];
+    [encoded writeToURL:self.strataJITRecordURL options:NSDataWritingAtomic error:nil];
+    if (self.pid > 0) [encoded writeToURL:[[self.strataJITRecordURL URLByDeletingLastPathComponent] URLByAppendingPathComponent:[NSString stringWithFormat:@"%d.json", self.pid]] options:NSDataWritingAtomic error:nil];
+}
+
+// Correlate a fresh launch token with the PID written by the guest itself.
+- (void)awaitStrataJITGuestUntil:(NSTimeInterval)deadline {
+    if (_isAppTerminationCleanUpCalled) return;
+    NSData *data = [NSData dataWithContentsOfURL:self.strataJITRecordURL];
+    NSDictionary *record = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    int ownPID = [record[@"pid"] intValue];
+    if ([record[@"token"] isEqual:self.strataJITToken] && ownPID > 0) {
+        int requestPID = [self.extension pidForRequestIdentifier:self.identifier];
+        if (!StrataGuestAcknowledgementMatches(record, self.strataJITToken, requestPID) || _isAppTerminationCleanUpCalled) {
+            [self.extension _kill:SIGTERM];
+            NSString *message = [record[@"stage"] isEqual:@"failed"] ? record[@"message"] : [NSString stringWithFormat:@"Guest PID acknowledgement mismatch (guest %d, extension %d).", ownPID, requestPID];
+            [self.delegate appSceneVC:self didInitializeWithError:[NSError errorWithDomain:@"StrataJITGuest" code:2 userInfo:@{NSLocalizedDescriptionKey:message}]];
+            return;
+        }
+        self.pid = ownPID;
+        [self.delegate appSceneVC:self didInitializeWithError:nil];
+        [self awaitStrataJITAttachmentUntil:NSProcessInfo.processInfo.systemUptime + 360.0];
+        return;
+    }
+    if (_isAppTerminationCleanUpCalled || NSProcessInfo.processInfo.systemUptime >= deadline) {
+        [self.extension _kill:SIGTERM];
+        [self.delegate appSceneVC:self didInitializeWithError:[NSError errorWithDomain:@"StrataJITGuest" code:1 userInfo:@{NSLocalizedDescriptionKey:@"Guest did not acknowledge the JIT startup gate. Keep all extensions when installing revision 12."}]];
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ [self awaitStrataJITGuestUntil:deadline]; });
+}
+
+// Scene setup can synchronously contact the guest. Keep it off the gate's critical path.
+- (void)awaitStrataJITAttachmentUntil:(NSTimeInterval)deadline {
+    if (_isAppTerminationCleanUpCalled) return;
+    NSData *data = [NSData dataWithContentsOfURL:self.strataJITRecordURL];
+    NSDictionary *record = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    if ([record[@"token"] isEqual:self.strataJITToken] && [record[@"stage"] isEqual:@"attached"]) {
+        [self setUpAppPresenter];
+        return;
+    }
+    if ([record[@"stage"] isEqual:@"failed"] || NSProcessInfo.processInfo.systemUptime >= deadline) {
+        [self.extension _kill:SIGTERM];
+        [self appTerminationCleanUp];
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ [self awaitStrataJITAttachmentUntil:deadline]; });
 }
 
 - (void)setUpAppPresenter {

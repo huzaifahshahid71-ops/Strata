@@ -4,11 +4,16 @@ import Intents
 
 @objc class AppDelegate: UIResponder, UIApplicationDelegate {
     func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
-        LiveBoardOrientation.mask
+        if #available(iOS 16.0, *), MultitaskDockManager.immersiveOrientationActive { return .all }
+        return LiveBoardOrientation.mask
     }
 
         
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? ) -> Bool {
+        if LCUtils.appGroupUserDefault.object(forKey: "LCJITEnablerType") == nil {
+            LCUtils.appGroupUserDefault.set(JITEnablerType.BuiltIn.rawValue, forKey: "LCJITEnablerType")
+        }
+        _ = LiveBoardArtworkStore() // Create visible folders and migrate imports even when starting in iOS Home.
         application.shortcutItems = nil
         UserDefaults.standard.removeObject(forKey: "LCNeedToAcquireJIT")
         

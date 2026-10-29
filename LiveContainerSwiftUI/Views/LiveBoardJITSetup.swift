@@ -3,7 +3,9 @@ import UniformTypeIdentifiers
 
 struct LiveBoardJITSetup: View {
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("LCJITEnablerType", store: LCUtils.appGroupUserDefault) private var provider = JITEnablerType.SideJITServer.rawValue
+    @AppStorage("LCJITEnablerType", store: LCUtils.appGroupUserDefault) private var provider = JITEnablerType.BuiltIn.rawValue
+    @AppStorage("StrataJITDeviceAddress", store: LCUtils.appGroupUserDefault) private var deviceAddress = "10.7.0.1"
+    @AppStorage("StrataJITRemotePairPort", store: LCUtils.appGroupUserDefault) private var remotePairPort = "49152"
     @ObservedObject private var session = LiveBoardJITSession.shared
     @State private var importing = false
     @State private var hasPairing = FileManager.default.fileExists(atPath: LiveBoardBuiltInJIT.pairingURL.path)
@@ -30,6 +32,13 @@ struct LiveBoardJITSetup: View {
                         Label(LCUtils.strataCanDebug() ? "Debugging permission available" : "Re-signing required: debugging permission missing", systemImage: LCUtils.strataCanDebug() ? "checkmark.shield" : "exclamationmark.shield")
                         Text("Built-in JIT uses a guest process to keep its debugger connection alive. Normal launch requests open that guest full-screen. Keep app extensions when installing Strata. On newer iOS versions, the guest may also need a compatible JIT script in its app settings.").foregroundStyle(.secondary)
                     }
+                    Section("Device connection") {
+                        TextField("Device IP (without /32)", text: $deviceAddress)
+                            .keyboardType(.decimalPad).autocorrectionDisabled()
+                        TextField("Remote pairing port", text: $remotePairPort)
+                            .keyboardType(.numberPad)
+                        Text("Copy the Device IP/Endpoint and RemotePair Port from your working SideStore connection. This does not change VPN settings.").font(.footnote).foregroundStyle(.secondary)
+                    }.disabled(session.busy)
                     Section("Connection check") {
                         Button("Prepare device") { perform("prepare") }.disabled(session.busy || !hasPairing)
                         Button("Reset developer disk image cache") { perform("reset") }.disabled(session.busy || !hasPairing)
@@ -53,6 +62,7 @@ struct LiveBoardJITSetup: View {
                     }
                 }
                 if provider != JITEnablerType.BuiltIn.rawValue && !session.message.isEmpty { Section { Text(session.message) } }
+                Section { NavigationLink("Memory and signing permissions") { StrataMemorySettings() } }
                 Section { NavigationLink("JIT-less setup and diagnostics") { LCJITLessDiagnoseView() } }
             }.navigationTitle("JIT setup")
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }

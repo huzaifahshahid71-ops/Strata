@@ -57,6 +57,7 @@ struct LiveBoardRootView: View {
                             }.buttonStyle(.plain)
                                 .accessibilityAddTraits(mode == option.rawValue ? .isSelected : [])
                         }
+                        StrataCreditsButton(location: "interface.about").padding(18).liveBoardGlass(radius: 20)
                     }.padding()
                 }
                 .navigationTitle("Interface")

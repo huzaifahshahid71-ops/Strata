@@ -286,6 +286,15 @@
     };
 }
 
+- (BOOL)enableGameModeSupportWithError:(NSError **)error {
+    NSMutableDictionary *updated = _infoPlist.mutableCopy;
+    updated[@"LSSupportsGameMode"] = @YES;
+    updated[@"GCSupportsGameMode"] = @YES;
+    NSData *data = [NSPropertyListSerialization dataWithPropertyList:updated format:NSPropertyListBinaryFormat_v1_0 options:0 error:error];
+    if (!data || ![data writeToFile:[_bundlePath stringByAppendingPathComponent:@"Info.plist"] options:NSDataWritingAtomic error:error]) return NO;
+    _infoPlist = updated;
+    return YES;
+}
 - (void)save {
     if(!_autoSaveDisabled) {
         [_info writeBinToFile:[NSString stringWithFormat:@"%@/LCAppInfo.plist", _bundlePath] atomically:YES];

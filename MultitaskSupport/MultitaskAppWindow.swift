@@ -23,6 +23,7 @@ struct MultitaskAppInfo {
 @objc class MultitaskWindowManager: NSObject {
     @Environment(\.openWindow) static var openWindow
     static var appDict: [String: MultitaskAppInfo] = [:]
+    static let guestControllers = NSMapTable<NSNumber, AppSceneViewController>.strongToWeakObjects()
     
     @objc class func openAppWindow(displayName: String, dataUUID: String, bundleId: String, pidCallback: ((NSNumber, Error?) -> Void)?) {
         DataManager.shared.model.enableMultipleWindow = true
@@ -58,11 +59,13 @@ struct AppSceneViewSwiftUI: UIViewControllerRepresentable {
             self.onExit = onExit
         }
         
-        func appSceneVCAppDidExit(_: AppSceneViewController!) {
+        func appSceneVCAppDidExit(_ vc: AppSceneViewController!) {
+            MultitaskWindowManager.guestControllers.removeObject(forKey: NSNumber(value: vc.pid))
             onExit()
         }
         
         func appSceneVC(_ vc: AppSceneViewController!, didInitializeWithError error: (any Error)!) {
+            if error == nil { MultitaskWindowManager.guestControllers.setObject(vc, forKey: NSNumber(value: vc.pid)) }
             DispatchQueue.main.async {
                 (vc.view.window?.windowScene?.statusBarManager as? LCStatusBarManager)?.nativeWindowViewController = vc
             }

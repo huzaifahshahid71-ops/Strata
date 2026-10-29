@@ -43,7 +43,14 @@ enum StrataJITWorker {
                     context.completeRequest(returningItems: nil)
                     return
                 }
-                let config = StikJIT.Configuration()
+                let address = input["deviceAddress"] as? String ?? "10.7.0.1"
+                let port = input["remotePairPort"] as? Int ?? 49152
+                let octets = address.split(separator: ".", omittingEmptySubsequences: false)
+                guard octets.count == 4, octets.allSatisfy({ UInt8($0) != nil }), let endpointPort = UInt16(exactly: port), endpointPort > 0 else {
+                    throw NSError(domain: "StrataJIT", code: 5, userInfo: [NSLocalizedDescriptionKey: "Invalid device endpoint."])
+                }
+                let config = StikJIT.Configuration(deviceAddress: address, rsdPort: endpointPort)
+                report("Connecting to device at \(address):\(endpointPort)…")
                 let readiness = StikJIT.prepareDevice(pairingFile: pairing, paths: paths, configuration: config) { stage in
                     report(String(describing: stage))
                 }

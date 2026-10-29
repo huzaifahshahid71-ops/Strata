@@ -1,6 +1,7 @@
 import Foundation
 
 protocol LCAppModelDelegate {
+    @MainActor func ensureBundled32BitRuntime(for app: LCAppModel) async throws
     func closeNavigationView()
     func changeAppVisibility(app : LCAppModel)
     func jitLaunch(appName: String, classicMode: UInt) async
@@ -211,10 +212,17 @@ class LCAppModel: ObservableObject, Hashable {
     
     // You should let LCAppModel.runApp to decide whether to run in multitask mode, but you may override the multitask parameter if necessary
     func runApp(multitask: Bool? = nil, containerFolderName : String? = nil, bundleIdOverride : String? = nil, urlStr : String? = nil, forceJIT: Bool? = nil) async throws{
-        if isAppRunning {
-            return
+        let acquired = await MainActor.run { () -> Bool in
+            guard !self.isAppRunning else { return false }
+            self.isAppRunning = true
+            return true
         }
-        
+        guard acquired else { return }
+        defer { Task { await MainActor.run { self.isAppRunning = false } } }
+        if appInfo.is32bit {
+            guard let delegate else { throw "App library is not ready to prepare the 32-bit runtime." }
+            try await delegate.ensureBundled32BitRuntime(for: self)
+        }
         if uiContainers.isEmpty {
             let newName = NSUUID().uuidString
             let newContainer = LCContainer(folderName: newName, name: newName, isShared: uiIsShared)
@@ -237,7 +245,7 @@ class LCAppModel: ObservableObject, Hashable {
         if builtInJIT && classicMode != 0 {
             throw "Built-in JIT requires normal compatibility mode. Turn off Classic Mode for this app, then retry."
         }
-        let preferredMultitask = classicMode == 0 ? (multitask ?? shouldLaunchInMultitaskMode) : false
+        let preferredMultitask = classicMode == 0 ? (multitask ?? (builtInJIT ? false : shouldLaunchInMultitaskMode)) : false
         // Keep the JIT target alive in a full-screen guest when normal presentation is requested.
         let fullScreenJIT = builtInJIT && !preferredMultitask
         let multitask = preferredMultitask || fullScreenJIT
@@ -319,14 +327,6 @@ class LCAppModel: ObservableObject, Hashable {
             }
         }
         
-        await MainActor.run {
-            isAppRunning = true
-        }
-        defer {
-            Task { await MainActor.run {
-                isAppRunning = false
-            }}
-        }
         try await signApp(force: false)
         
         if let bundleIdOverride {
@@ -349,7 +349,7 @@ class LCAppModel: ObservableObject, Hashable {
         if jitNeeded {
             if multitask, #available(iOS 17.4, *) {
                 try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                    LCUtils.launchMultitaskGuestApp(appInfo.displayName(), fullScreen: fullScreenJIT) { pidNumber, error in
+                    LCUtils.launchMultitaskGuestApp(appInfo.displayName(), fullScreen: fullScreenJIT, waitForJIT: builtInJIT) { pidNumber, error in
                         if let error {
                             continuation.resume(throwing: error)
                             return
@@ -359,7 +359,7 @@ class LCAppModel: ObservableObject, Hashable {
                             return
                         }
                         Task {
-                            if let scriptData = self.jitLaunchScriptJs, !scriptData.isEmpty {
+                            if let scriptData = self.resolvedJITScript, !scriptData.isEmpty {
                                 await self.delegate?.jitLaunch(withPID: pidNumber.intValue, withScript: scriptData, appName: self.appInfo.displayName())
                             } else {
                                 await self.delegate?.jitLaunch(withPID: pidNumber.intValue, withScript: nil, appName: self.appInfo.displayName())
@@ -370,7 +370,7 @@ class LCAppModel: ObservableObject, Hashable {
                 }
             } else {
                 // Non-multitask JIT flow remains unchanged
-                if let scriptData = jitLaunchScriptJs, !scriptData.isEmpty {
+                if let scriptData = resolvedJITScript, !scriptData.isEmpty {
                     await delegate?.jitLaunch(withScript: scriptData, appName: self.appInfo.displayName(), classicMode: classicMode)
                 } else {
                     await delegate?.jitLaunch(appName: self.appInfo.displayName(), classicMode: classicMode)

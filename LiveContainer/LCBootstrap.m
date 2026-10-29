@@ -1,3 +1,6 @@
+#import "StrataRuntimePath.h"
+#import "StrataProcessMemory.h"
+#import "StrataGuestControls.h"
 #import "FoundationPrivate.h"
 #import "LCMachOUtils.h"
 #import "LCSharedUtils.h"
@@ -299,6 +302,13 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
         return @"App bundle not found! Unable to read LCAppInfo.plist.";
     }
     
+    NSString *hudKey = [NSString stringWithFormat:@"%@:%@", isSharedBundle ? @"shared" : @"local", selectedApp ?: @"builtin:sidestore"];
+    NSMutableDictionary *hudRequests = [[lcSharedDefaults dictionaryForKey:@"StrataMetalHUDApps"] mutableCopy] ?: [NSMutableDictionary new];
+    BOOL strataMetalHUD = [hudRequests[hudKey] boolValue];
+    [hudRequests removeObjectForKey:hudKey];
+    [lcSharedDefaults setObject:hudRequests forKey:@"StrataMetalHUDApps"];
+    if (strataMetalHUD) setenv("MTL_HUD_ENABLED", "1", 1);
+
     if([guestAppInfo[@"doUseLCBundleId"] boolValue] ) {
         NSMutableDictionary* infoPlist = [NSMutableDictionary dictionaryWithContentsOfFile:[NSString stringWithFormat:@"%@/Info.plist", bundlePath]];
         CFErrorRef error = NULL;
@@ -549,10 +559,10 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
             *path = oldPath;
             return appError;
         }
-        NSBundle *selected32bitLayerBundle = [NSBundle bundleWithPath:[NSString stringWithFormat:@"%@/Applications/%@", docPath, selected32BitLayer]];
-        if(!selected32bitLayerBundle) {
-            selected32bitLayerBundle = [NSBundle bundleWithPath:[NSString stringWithFormat:@"%@/Applications/%@", appGroupFolder.path, selected32BitLayer]];
-        }
+        if (![selected32BitLayer.lastPathComponent isEqualToString:selected32BitLayer] || [selected32BitLayer containsString:@"\\"] || ![selected32BitLayer.pathExtension.lowercaseString isEqualToString:@"app"]) return @"Invalid 32-bit runtime selection. Select an installed runtime in app settings.";
+        bool runtimeIsShared = false;
+        NSBundle *selected32bitLayerBundle = StrataFind32BitRuntime(selected32BitLayer, [NSURL fileURLWithPath:docPath], [LCSharedUtils appGroupPath]);
+        if (selected32bitLayerBundle && (!selected32bitLayerBundle.executablePath || ![fm isReadableFileAtPath:selected32bitLayerBundle.executablePath])) selected32bitLayerBundle = nil;
         if(!selected32bitLayerBundle) {
             appError = @"The specified 32-bit emulator app is not found";
             NSLog(@"[LCBootstrap] %@", appError);
@@ -620,6 +630,11 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
     
     // Fix dynamic properties of some apps
     [NSUserDefaults performSelector:@selector(initialize)];
+    if (strataMetalHUD) {
+        NSMutableDictionary *hudArguments = [[NSUserDefaults.standardUserDefaults volatileDomainForName:NSArgumentDomain] mutableCopy] ?: [NSMutableDictionary new];
+        hudArguments[@"MetalForceHudEnabled"] = @YES;
+        [NSUserDefaults.standardUserDefaults setVolatileDomain:hudArguments forName:NSArgumentDomain];
+    }
 
     // Attempt to load the bundle. 32-bit bundle will always fail because of 32-bit main executable, so ignore it
     if (!is32bit && ![appBundle loadAndReturnError:&error]) {
@@ -805,6 +820,14 @@ int LiveContainerMain(int argc, char *argv[]) {
             lcLaunchURL = launchUrl;
             [lcUserDefaults removeObjectForKey:@"launchAppUrlScheme"];
         }
+        if (!isLiveProcess) {
+            StrataStartProcessMemoryDiagnostics([LCSharedUtils appGroupID], selectedApp ?: @"builtinSideStore", @"inProcess");
+        }
+        bool controlsShared = false;
+        NSBundle *controlsBundle = selectedApp ? [LCSharedUtils findBundleWithBundleId:selectedApp isSharedAppOut:&controlsShared] : nil;
+        NSString *controlsName = [controlsBundle objectForInfoDictionaryKey:@"CFBundleDisplayName"] ?: [controlsBundle objectForInfoDictionaryKey:@"CFBundleName"] ?: selectedApp ?: @"SideStore";
+        NSString *controlsKey = selectedApp ? [NSString stringWithFormat:@"%@:%@", controlsShared ? @"shared" : @"local", selectedApp] : @"builtin:sidestore";
+        StrataStartGuestControlsWithIdentity([LCSharedUtils appGroupID], controlsName, isLiveProcess, controlsKey);
         NSString *appError = invokeAppMain(selectedApp, selectedContainer, argc, argv);
         if (appError) {
             if(isLiveProcess) {

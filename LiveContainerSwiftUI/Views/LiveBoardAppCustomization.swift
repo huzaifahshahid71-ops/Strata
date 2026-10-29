@@ -9,11 +9,14 @@ import SwiftUI
     private var names: [String: String] { defaults.dictionary(forKey: "StrataAppNames") as? [String: String] ?? [:] }
     private var icons: [String: String] { defaults.dictionary(forKey: "StrataAppIcons") as? [String: String] ?? [:] }
     private var directory: URL { FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Strata/Icons") }
+    private var cachedLegacy = ""
+    private var legacyAliases: [String: String] = [:]
     func name(_ app: LCAppModel) -> String {
         let key = liveBoardAppKey(app)
         if let name = names[key] { return name }
-        let legacy = LiveBoardHomeLayout.decode(defaults.string(forKey: "LiveBoardHomeLayout") ?? "")
-        return legacy.aliases[key] ?? app.displayName
+        let encoded = defaults.string(forKey: "LiveBoardHomeLayout") ?? ""
+        if encoded != cachedLegacy { cachedLegacy = encoded; legacyAliases = LiveBoardHomeLayout.decode(encoded).aliases }
+        return legacyAliases[key] ?? app.displayName
     }
     func rename(_ app: LCAppModel, to value: String) {
         let key = liveBoardAppKey(app); var map = names

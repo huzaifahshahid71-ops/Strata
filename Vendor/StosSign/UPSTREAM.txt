@@ -1,0 +1,4 @@
+https://github.com/stossy11/StosSign
+f8075577623707bd7899a884f31f2c4674af18d4
+Local integration patches: public AnisetteResponse fields; remove raw diagnostic prints; cancellation with single-resume protection; ephemeral anisette networking.
+Redistribution permission for inclusion in Strata was confirmed by the Strata project maintainer on 2026-10-29, stating that permission had already been obtained from the developer. No standalone upstream LICENSE was present at the pinned commit. This notice records the maintainer's confirmation; it does not invent an upstream license or grant blanket rights to this dependency. Preserve original authorship notices.

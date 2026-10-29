@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A22000000000000000000001 /* StrataGuestControls.m in Sources */ = {isa = PBXBuildFile; fileRef = A22000000000000000000002 /* StrataGuestControls.m */; };
+		A20000000000000000000001 /* StrataProcessMemory.m in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* StrataProcessMemory.m */; };
 		173545AF2E2C7913001B3B4C /* SideStoreSupport.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 173545A82E2C7913001B3B4C /* SideStoreSupport.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		17413FBC2D9C0BAE00F3F928 /* LiveContainerSwiftUI.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 17413FB52D9C0BAE00F3F928 /* LiveContainerSwiftUI.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		174140902D9C0E8200F3F928 /* TweakLoader.dylib in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 1741403A2D9C0D0000F3F928 /* TweakLoader.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
@@ -33,6 +35,10 @@
 		E16D95742E1CD2980068EB63 /* LCMachOUtils.m in Sources */ = {isa = PBXBuildFile; fileRef = E16D94DE2E1CC8200068EB63 /* LCMachOUtils.m */; };
 		E16D95752E1CD2B90068EB63 /* LiveContainerShared.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E1292BD62DCA3B660065E12D /* LiveContainerShared.framework */; };
 		E1946AD83041BFF8005CBEDD /* IOKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E1946AD63041BFDD005CBEDD /* IOKit.framework */; };
+		A15000000000000000000010 /* StosSign_API in Frameworks */ = {isa = PBXBuildFile; productRef = A15000000000000000000020 /* StosSign_API */; };
+		A15000000000000000000011 /* StosSign_Auth in Frameworks */ = {isa = PBXBuildFile; productRef = A15000000000000000000021 /* StosSign_Auth */; };
+		A15000000000000000000012 /* StosSign_Anisette in Frameworks */ = {isa = PBXBuildFile; productRef = A15000000000000000000022 /* StosSign_Anisette */; };
+		A15000000000000000000013 /* StosSign_Common in Frameworks */ = {isa = PBXBuildFile; productRef = A15000000000000000000023 /* StosSign_Common */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -155,6 +161,9 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		A22000000000000000000002 /* StrataGuestControls.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = StrataGuestControls.m; sourceTree = "<group>"; };
+		A20000000000000000000002 /* StrataProcessMemory.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = StrataProcessMemory.m; sourceTree = "<group>"; };
+		A20000000000000000000003 /* StrataProcessMemory.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = StrataProcessMemory.h; sourceTree = "<group>"; };
 		172978E8302EAF07004A3E78 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		172CA8542D9D721700CF6989 /* dyld_bypass_validation.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = dyld_bypass_validation.m; sourceTree = "<group>"; };
 		172CA8552D9D721700CF6989 /* FoundationPrivate.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = FoundationPrivate.h; sourceTree = "<group>"; };
@@ -340,6 +349,10 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A15000000000000000000013 /* StosSign_Common in Frameworks */,
+				A15000000000000000000012 /* StosSign_Anisette in Frameworks */,
+				A15000000000000000000011 /* StosSign_Auth in Frameworks */,
+				A15000000000000000000010 /* StosSign_API in Frameworks */,
 				E1946AD83041BFF8005CBEDD /* IOKit.framework in Frameworks */,
 				E16D95752E1CD2B90068EB63 /* LiveContainerShared.framework in Frameworks */,
 				174140D62D9C176F00F3F928 /* libarchive.tbd in Frameworks */,
@@ -424,6 +437,9 @@
 				172CA8582D9D721700CF6989 /* Localization.h */,
 				172CA8592D9D721700CF6989 /* Localization.m */,
 				172CA85A2D9D721700CF6989 /* LCBootstrap.m */,
+				A20000000000000000000002 /* StrataProcessMemory.m */,
+				A22000000000000000000002 /* StrataGuestControls.m */,
+				A20000000000000000000003 /* StrataProcessMemory.h */,
 				172CA85C2D9D721700CF6989 /* UIKitPrivate.h */,
 				172CA85D2D9D721700CF6989 /* utils.h */,
 				172CA85E2D9D721700CF6989 /* utils.m */,
@@ -573,6 +589,10 @@
 			);
 			name = LiveContainerSwiftUI;
 			packageProductDependencies = (
+				A15000000000000000000023 /* StosSign_Common */,
+				A15000000000000000000022 /* StosSign_Anisette */,
+				A15000000000000000000021 /* StosSign_Auth */,
+				A15000000000000000000020 /* StosSign_API */,
 			);
 			productName = LiveContainerSwiftUI;
 			productReference = 17413FB52D9C0BAE00F3F928 /* LiveContainerSwiftUI.framework */;
@@ -852,6 +872,7 @@
 			);
 			mainGroup = 17DCE9942C7067EC00731D42;
 			packageReferences = (
+				A15000000000000000000000 /* StosSign */,
 			);
 			preferredProjectObjectVersion = 56;
 			productRefGroup = 17DCE99E2C7067EC00731D42 /* Products */;
@@ -1019,6 +1040,8 @@
 				E16D95742E1CD2980068EB63 /* LCMachOUtils.m in Sources */,
 				E1292C082DCA434F0065E12D /* LCSharedUtils.m in Sources */,
 				E1292C0B2DCA43560065E12D /* LCBootstrap.m in Sources */,
+				A20000000000000000000001 /* StrataProcessMemory.m in Sources */,
+				A22000000000000000000001 /* StrataGuestControls.m in Sources */,
 				E1292C0A2DCA43540065E12D /* utils.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -1072,6 +1095,16 @@
 			targetProxy = E1292BE92DCA3B670065E12D /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
+
+/* Begin XCLocalSwiftPackageReference section */
+        A15000000000000000000000 /* StosSign */ = {isa = XCLocalSwiftPackageReference; relativePath = Vendor/StosSign; };
+/* End XCLocalSwiftPackageReference section */
+/* Begin XCSwiftPackageProductDependency section */
+		A15000000000000000000020 /* StosSign_API */ = {isa = XCSwiftPackageProductDependency; package = A15000000000000000000000; productName = StosSign_API; };
+		A15000000000000000000021 /* StosSign_Auth */ = {isa = XCSwiftPackageProductDependency; package = A15000000000000000000000; productName = StosSign_Auth; };
+		A15000000000000000000022 /* StosSign_Anisette */ = {isa = XCSwiftPackageProductDependency; package = A15000000000000000000000; productName = StosSign_Anisette; };
+		A15000000000000000000023 /* StosSign_Common */ = {isa = XCSwiftPackageProductDependency; package = A15000000000000000000000; productName = StosSign_Common; };
+/* End XCSwiftPackageProductDependency section */
 
 /* Begin XCBuildConfiguration section */
 		173545B12E2C7913001B3B4C /* Debug */ = {

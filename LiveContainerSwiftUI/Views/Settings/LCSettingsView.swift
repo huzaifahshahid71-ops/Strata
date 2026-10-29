@@ -58,7 +58,7 @@ struct LCSettingsView: View {
     
     @AppStorage("LCSideJITServerAddress", store: LCUtils.appGroupUserDefault) var sideJITServerAddress : String = ""
     @AppStorage("LCDeviceUDID", store: LCUtils.appGroupUserDefault) var deviceUDID: String = ""
-    @AppStorage("LCJITEnablerType", store: LCUtils.appGroupUserDefault) var JITEnabler: JITEnablerType = .SideJITServer
+    @AppStorage("LCJITEnablerType", store: LCUtils.appGroupUserDefault) var JITEnabler: JITEnablerType = .BuiltIn
     
     @State var store : Store = .Unknown
     
@@ -84,6 +84,7 @@ struct LCSettingsView: View {
     var body: some View {
         NavigationView {
             Form {
+                Section("Strata") { StrataCreditsButton(location: "settings.about") }
                 if sharedModel.multiLCStatus != 2 {
                     Section{
                         if !certificateDataFound {
@@ -192,6 +193,7 @@ struct LCSettingsView: View {
                     Text("lc.settings.JitDesc".loc)
                 }
                 
+                Section { NavigationLink("Memory and signing permissions") { StrataMemorySettings() } }
                 Section {
                     Picker(selection: $selected32BitEmulator) {
                         ForEach(sharedModel.arm32EmuApps, id: \.self) { app in
