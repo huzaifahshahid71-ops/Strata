@@ -4,6 +4,13 @@
 #import <UIKit/UIKit.h>
 #import <unistd.h>
 
+static NSString *const kStrataFloatingHomeButtonKey = @"StrataFloatingHomeButton";
+static NSString *const kStrataFloatingHomeButtonSideKey = @"StrataFloatingHomeButtonLeft";
+static NSString *const kStrataFloatingHomeButtonYKey = @"StrataFloatingHomeButtonY";
+static const CGFloat kFloatingButtonSize = 48.0;
+static const CGFloat kFloatingEdgeInset = 10.0;
+static const CGFloat kFloatingIdleAlpha = 0.45;
+
 @interface StrataControlsWindow : UIWindow
 @end
 @implementation StrataControlsWindow
@@ -14,10 +21,15 @@
 @end
 @interface StrataControlsController : UIViewController
 @property(nonatomic) UIInterfaceOrientationMask orientationMask;
+@property(nonatomic, copy) void (^onLayout)(void);
 @end
 @implementation StrataControlsController
 - (BOOL)prefersStatusBarHidden { return YES; }
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations { return self.orientationMask ?: UIInterfaceOrientationMaskAllButUpsideDown; }
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    if (self.onLayout) self.onLayout();
+}
 @end
 @interface StrataGuestControls : NSObject<UIGestureRecognizerDelegate>
 @property(nonatomic) NSString *group;
@@ -26,12 +38,18 @@
 @property(nonatomic) BOOL separateProcess;
 @property(nonatomic) BOOL hostMode;
 @property(nonatomic) UIWindow *panel;
+@property(nonatomic) UIWindow *floatingWindow;
+@property(nonatomic) UIView *floatingButton;
+@property(nonatomic) NSTimer *floatingIdleTimer;
 @property(nonatomic, weak) UIWindow *previousKeyWindow;
 @property(nonatomic) NSHashTable<UIWindow *> *installedWindows;
 @end
 @implementation StrataGuestControls
+- (NSUserDefaults *)sharedDefaults {
+    return self.group.length ? [[NSUserDefaults alloc] initWithSuiteName:self.group] : NSUserDefaults.lcSharedDefaults;
+}
 - (void)installInWindow:(UIWindow *)window {
-    if (!window || [self.installedWindows containsObject:window]) return;
+    if (!window || window == self.floatingWindow || [self.installedWindows containsObject:window]) return;
     [self.installedWindows addObject:window];
     UITapGestureRecognizer *gesture = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(toggle:)];
     gesture.numberOfTouchesRequired = 3;
@@ -40,6 +58,7 @@
     gesture.delaysTouchesBegan = NO;
     gesture.delegate = self;
     [window addGestureRecognizer:gesture];
+    [self refreshFloatingHomeButtonForWindow:window];
 }
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gesture shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other { return YES; }
 - (void)hide {
@@ -47,6 +66,187 @@
     self.panel = nil;
     if (!self.previousKeyWindow.hidden) [self.previousKeyWindow makeKeyWindow];
     self.previousKeyWindow = nil;
+}
+- (void)hideFloatingHomeButton {
+    [self.floatingIdleTimer invalidate];
+    self.floatingIdleTimer = nil;
+    self.floatingWindow.hidden = YES;
+    self.floatingWindow = nil;
+    self.floatingButton = nil;
+}
+- (void)scheduleFloatingIdleFade {
+    [self.floatingIdleTimer invalidate];
+    __weak typeof(self) weakSelf = self;
+    self.floatingIdleTimer = [NSTimer scheduledTimerWithTimeInterval:2.5 repeats:NO block:^(NSTimer *timer) {
+        [UIView animateWithDuration:0.25 animations:^{
+            weakSelf.floatingButton.alpha = kFloatingIdleAlpha;
+        }];
+    }];
+}
+- (CGPoint)snappedFloatingCenterForPoint:(CGPoint)point inView:(UIView *)hostView {
+    CGRect bounds = hostView.bounds;
+    UIEdgeInsets insets = hostView.safeAreaInsets;
+    CGFloat half = kFloatingButtonSize * 0.5;
+    CGFloat minX = insets.left + kFloatingEdgeInset + half;
+    CGFloat maxX = MAX(minX, CGRectGetWidth(bounds) - insets.right - kFloatingEdgeInset - half);
+    CGFloat minY = insets.top + kFloatingEdgeInset + half;
+    CGFloat maxY = MAX(minY, CGRectGetHeight(bounds) - insets.bottom - kFloatingEdgeInset - half);
+    BOOL snapLeft = point.x < CGRectGetMidX(bounds);
+    CGFloat targetX = snapLeft ? minX : maxX;
+    CGFloat targetY = MIN(MAX(point.y, minY), maxY);
+    return CGPointMake(targetX, targetY);
+}
+- (void)layoutFloatingButtonAnimated:(BOOL)animated {
+    UIView *hostView = self.floatingWindow.rootViewController.view;
+    if (!hostView || !self.floatingButton || CGRectIsEmpty(hostView.bounds)) return;
+    NSUserDefaults *defaults = [self sharedDefaults];
+    BOOL snapLeft = [defaults objectForKey:kStrataFloatingHomeButtonSideKey] ? [defaults boolForKey:kStrataFloatingHomeButtonSideKey] : NO;
+    CGFloat ratioY = [defaults objectForKey:kStrataFloatingHomeButtonYKey] ? [defaults doubleForKey:kStrataFloatingHomeButtonYKey] : 0.35;
+    ratioY = MIN(MAX(ratioY, 0.05), 0.95);
+    CGPoint desired = CGPointMake(snapLeft ? 0.0 : CGRectGetWidth(hostView.bounds), CGRectGetHeight(hostView.bounds) * ratioY);
+    CGPoint center = [self snappedFloatingCenterForPoint:desired inView:hostView];
+    if (animated) {
+        [UIView animateWithDuration:0.22 delay:0 usingSpringWithDamping:0.82 initialSpringVelocity:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+            self.floatingButton.center = center;
+        } completion:nil];
+    } else {
+        self.floatingButton.center = center;
+    }
+}
+- (void)handleFloatingPan:(UIPanGestureRecognizer *)pan {
+    UIView *hostView = self.floatingWindow.rootViewController.view;
+    if (!hostView || !self.floatingButton) return;
+    if (pan.state == UIGestureRecognizerStateBegan) {
+        [self.floatingIdleTimer invalidate];
+        [UIView animateWithDuration:0.15 animations:^{ self.floatingButton.alpha = 1.0; }];
+    } else if (pan.state == UIGestureRecognizerStateChanged) {
+        CGPoint delta = [pan translationInView:hostView];
+        [pan setTranslation:CGPointZero inView:hostView];
+        CGFloat half = kFloatingButtonSize * 0.5;
+        CGFloat x = MIN(MAX(self.floatingButton.center.x + delta.x, half), CGRectGetWidth(hostView.bounds) - half);
+        CGFloat y = MIN(MAX(self.floatingButton.center.y + delta.y, half), CGRectGetHeight(hostView.bounds) - half);
+        self.floatingButton.center = CGPointMake(x, y);
+    } else if (pan.state == UIGestureRecognizerStateEnded || pan.state == UIGestureRecognizerStateCancelled) {
+        CGPoint velocity = [pan velocityInView:hostView];
+        CGPoint projected = CGPointMake(self.floatingButton.center.x + velocity.x * 0.08, self.floatingButton.center.y + velocity.y * 0.08);
+        CGPoint snapped = [self snappedFloatingCenterForPoint:projected inView:hostView];
+        NSUserDefaults *defaults = [self sharedDefaults];
+        BOOL snapLeft = snapped.x < CGRectGetMidX(hostView.bounds);
+        CGFloat height = MAX(CGRectGetHeight(hostView.bounds), 1.0);
+        [defaults setBool:snapLeft forKey:kStrataFloatingHomeButtonSideKey];
+        [defaults setDouble:snapped.y / height forKey:kStrataFloatingHomeButtonYKey];
+        [UIView animateWithDuration:0.26 delay:0 usingSpringWithDamping:0.78 initialSpringVelocity:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+            self.floatingButton.center = snapped;
+        } completion:nil];
+        [self scheduleFloatingIdleFade];
+    }
+}
+- (void)handleFloatingHomeTap {
+    [self.floatingIdleTimer invalidate];
+    [UIView animateWithDuration:0.12 animations:^{
+        self.floatingButton.alpha = 1.0;
+        self.floatingButton.transform = CGAffineTransformMakeScale(0.9, 0.9);
+    } completion:^(BOOL finished) {
+        self.floatingButton.transform = CGAffineTransformIdentity;
+        [self hideFloatingHomeButton];
+        [self request:@"close"];
+    }];
+}
+- (void)refreshFloatingHomeButtonForWindow:(UIWindow *)source {
+    if (self.hostMode) return;
+    BOOL enabled = [[self sharedDefaults] boolForKey:kStrataFloatingHomeButtonKey];
+    if (!enabled) {
+        [self hideFloatingHomeButton];
+        return;
+    }
+    if (self.floatingWindow) {
+        if (!self.floatingWindow.windowScene && source.windowScene) {
+            self.floatingWindow.windowScene = source.windowScene;
+            self.floatingWindow.frame = source.windowScene.coordinateSpace.bounds;
+            [self layoutFloatingButtonAnimated:NO];
+        }
+        self.floatingWindow.hidden = NO;
+        return;
+    }
+    UIWindow *anchor = source;
+    if (!anchor) {
+        for (UIWindowScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (![scene isKindOfClass:UIWindowScene.class]) continue;
+            for (UIWindow *candidate in scene.windows) {
+                if (candidate != self.panel && candidate != self.floatingWindow) { anchor = candidate; break; }
+            }
+            if (anchor) break;
+        }
+    }
+    if (!anchor) anchor = UIApplication.sharedApplication.windows.firstObject;
+    if (!anchor) return;
+
+    UIWindowScene *scene = anchor.windowScene;
+    CGRect frame = scene ? scene.coordinateSpace.bounds : (CGRectIsEmpty(anchor.bounds) ? UIScreen.mainScreen.bounds : anchor.bounds);
+    StrataControlsWindow *window = scene ? [[StrataControlsWindow alloc] initWithWindowScene:scene] : [[StrataControlsWindow alloc] initWithFrame:frame];
+    window.frame = frame;
+    window.accessibilityIdentifier = @"strata.floatingHome.window";
+    window.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    window.windowLevel = UIWindowLevelAlert + 2;
+    window.backgroundColor = UIColor.clearColor;
+
+    StrataControlsController *controller = [StrataControlsController new];
+    __weak typeof(self) weakSelf = self;
+    controller.onLayout = ^{ [weakSelf layoutFloatingButtonAnimated:NO]; };
+    window.rootViewController = controller;
+    controller.view.backgroundColor = UIColor.clearColor;
+
+    UIView *container = [[UIView alloc] initWithFrame:CGRectMake(0, 0, kFloatingButtonSize, kFloatingButtonSize)];
+    container.layer.shadowColor = UIColor.blackColor.CGColor;
+    container.layer.shadowOpacity = 0.32;
+    container.layer.shadowRadius = 8.0;
+    container.layer.shadowOffset = CGSizeMake(0, 3);
+
+    UIVisualEffect *effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterialDark];
+    if (@available(iOS 26.0, *)) effect = [UIGlassEffect effectWithStyle:UIGlassEffectStyleRegular];
+    UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:effect];
+    blur.frame = container.bounds;
+    blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    blur.layer.cornerRadius = kFloatingButtonSize * 0.5;
+    blur.layer.borderWidth = 1.0;
+    blur.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.28].CGColor;
+    blur.clipsToBounds = YES;
+    blur.userInteractionEnabled = NO;
+    [container addSubview:blur];
+
+    UIView *innerRing = [[UIView alloc] initWithFrame:CGRectInset(container.bounds, 9, 9)];
+    innerRing.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    innerRing.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.16];
+    innerRing.layer.cornerRadius = CGRectGetWidth(innerRing.bounds) * 0.5;
+    innerRing.layer.borderWidth = 1.5;
+    innerRing.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.85].CGColor;
+    innerRing.userInteractionEnabled = NO;
+    [blur.contentView addSubview:innerRing];
+
+    UIImageSymbolConfiguration *symConfig = [UIImageSymbolConfiguration configurationWithPointSize:14 weight:UIImageSymbolWeightSemibold];
+    UIImageView *glyph = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"house.fill" withConfiguration:symConfig]];
+    glyph.tintColor = UIColor.whiteColor;
+    glyph.center = CGPointMake(CGRectGetMidX(innerRing.bounds), CGRectGetMidY(innerRing.bounds));
+    glyph.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin | UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin;
+    [innerRing addSubview:glyph];
+
+    UIButton *tapButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    tapButton.frame = container.bounds;
+    tapButton.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    tapButton.accessibilityIdentifier = @"strata.floatingHome.button";
+    tapButton.accessibilityLabel = @"Return to Strata Home";
+    [tapButton addTarget:self action:@selector(handleFloatingHomeTap) forControlEvents:UIControlEventTouchUpInside];
+    [container addSubview:tapButton];
+
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleFloatingPan:)];
+    [container addGestureRecognizer:pan];
+
+    [controller.view addSubview:container];
+    self.floatingWindow = window;
+    self.floatingButton = container;
+    [self layoutFloatingButtonAnimated:NO];
+    window.hidden = NO;
+    [self scheduleFloatingIdleFade];
 }
 - (void)request:(NSString *)action {
     if (self.hostMode) {
@@ -56,6 +256,7 @@
     }
     if (!self.separateProcess) {
         [self hide];
+        [self hideFloatingHomeButton];
         // A normal guest owns the main process. Use the existing self-relaunch
         // path to return to the launcher, without requiring a manual force-quit.
         [NSUserDefaults.lcUserDefaults removeObjectForKey:@"selected"];
@@ -236,11 +437,18 @@ void StrataStartGuestControlsWithIdentity(NSString *group, NSString *appName, BO
         [NSNotificationCenter.defaultCenter addObserverForName:UIWindowDidBecomeVisibleNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
             if ([note.object isKindOfClass:UIWindow.class]) [controls installInWindow:note.object];
         }];
+        [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+            [controls refreshFloatingHomeButtonForWindow:nil];
+        }];
+        [NSNotificationCenter.defaultCenter addObserverForName:NSUserDefaultsDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+            [controls refreshFloatingHomeButtonForWindow:nil];
+        }];
         for (UIWindow *window in UIApplication.sharedApplication.windows) [controls installInWindow:window];
         for (UIWindowScene *scene in UIApplication.sharedApplication.connectedScenes) {
             if (![scene isKindOfClass:UIWindowScene.class]) continue;
             for (UIWindow *window in scene.windows) [controls installInWindow:window];
         }
+        [controls refreshFloatingHomeButtonForWindow:nil];
     });
 }
 

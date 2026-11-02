@@ -55,6 +55,7 @@ struct LCSettingsView: View {
     @AppStorage("LCStrictHiding", store: LCUtils.appGroupUserDefault) var strictHiding = false
     @AppStorage("dynamicColors", store: LCUtils.appGroupUserDefault) var dynamicColors = true
     @AppStorage("darkModeIcon", store: LCUtils.appGroupUserDefault) var darkModeIcon = false
+    @AppStorage("StrataFloatingHomeButton", store: LCUtils.appGroupUserDefault) var floatingHomeButton = false
     
     @AppStorage("LCSideJITServerAddress", store: LCUtils.appGroupUserDefault) var sideJITServerAddress : String = ""
     @AppStorage("LCDeviceUDID", store: LCUtils.appGroupUserDefault) var deviceUDID: String = ""
@@ -84,7 +85,13 @@ struct LCSettingsView: View {
     var body: some View {
         NavigationView {
             Form {
-                Section("Strata") { StrataCreditsButton(location: "settings.about") }
+                Section("Strata") {
+                    Toggle("Enable Floating Home Button", isOn: $floatingHomeButton)
+                    Text("Shows a draggable quick-exit button while an app is running. Tap it to close the app and return to Strata.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    StrataCreditsButton(location: "settings.about")
+                }
                 if sharedModel.multiLCStatus != 2 {
                     Section{
                         if !certificateDataFound {

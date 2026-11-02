@@ -2,9 +2,14 @@ import SwiftUI
 struct StrataSwitcherSettings: View {
     let apps: [LCAppModel]
     @State private var pinned: [String] = []
+    @AppStorage("StrataFloatingHomeButton", store: LCUtils.appGroupUserDefault) private var floatingHomeButton = false
     var body: some View {
         Form {
-            Section { Text("Three-finger tap shows running apps and your pinned shortcuts. The same app strip is used in Strata and inside guests.").font(.subheadline) }
+            Section {
+                Text("Three-finger tap shows running apps and your pinned shortcuts. The same app strip is used in Strata and inside guests.").font(.subheadline)
+                Toggle("Enable Floating Home Button", isOn: $floatingHomeButton)
+                Text("Shows a draggable quick-exit button while an app is running. Tap it to close the app and return to Strata.").font(.footnote).foregroundStyle(.secondary)
+            }
             Section("Pinned apps") {
                 ForEach(apps, id: \.self) { app in
                     Toggle(LiveBoardAppCustomization.shared.name(app), isOn: Binding(get: { pinned.contains(liveBoardAppKey(app)) }, set: { enabled in
