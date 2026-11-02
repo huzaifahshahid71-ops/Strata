@@ -857,6 +857,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             finalNewApp.isJITNeeded = appToReplace.appInfo.isJITNeeded
             finalNewApp.isShared = appToReplace.appInfo.isShared
             finalNewApp.spoofSDKVersion = appToReplace.appInfo.spoofSDKVersion
+            finalNewApp.launchWithGameMode = appToReplace.appInfo.launchWithGameMode
+            finalNewApp.launchWithMetalHUD = appToReplace.appInfo.launchWithMetalHUD
             finalNewApp.doSymlinkInbox = appToReplace.appInfo.doSymlinkInbox
             finalNewApp.containerInfo = appToReplace.appInfo.containerInfo
             finalNewApp.tweakFolder = appToReplace.appInfo.tweakFolder

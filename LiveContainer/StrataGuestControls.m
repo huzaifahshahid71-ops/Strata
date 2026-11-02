@@ -58,7 +58,9 @@ static const CGFloat kFloatingIdleAlpha = 0.45;
     gesture.delaysTouchesBegan = NO;
     gesture.delegate = self;
     [window addGestureRecognizer:gesture];
-    [self refreshFloatingHomeButtonForWindow:window];
+    if (window != self.panel) {
+        [self refreshFloatingHomeButtonForWindow:window];
+    }
 }
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gesture shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other { return YES; }
 - (void)hide {
@@ -168,17 +170,23 @@ static const CGFloat kFloatingIdleAlpha = 0.45;
         self.floatingWindow.hidden = NO;
         return;
     }
-    UIWindow *anchor = source;
+    UIApplication *app = UIApplication.sharedApplication;
+    if (!app || app.applicationState == UIApplicationStateBackground) return;
+    UIWindow *anchor = (source && ![source isKindOfClass:StrataControlsWindow.class]) ? source : nil;
     if (!anchor) {
-        for (UIWindowScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        for (UIWindowScene *scene in app.connectedScenes) {
             if (![scene isKindOfClass:UIWindowScene.class]) continue;
             for (UIWindow *candidate in scene.windows) {
-                if (candidate != self.panel && candidate != self.floatingWindow) { anchor = candidate; break; }
+                if (![candidate isKindOfClass:StrataControlsWindow.class] && !candidate.hidden) { anchor = candidate; break; }
             }
             if (anchor) break;
         }
     }
-    if (!anchor) anchor = UIApplication.sharedApplication.windows.firstObject;
+    if (!anchor) {
+        for (UIWindow *candidate in app.windows) {
+            if (![candidate isKindOfClass:StrataControlsWindow.class] && !candidate.hidden) { anchor = candidate; break; }
+        }
+    }
     if (!anchor) return;
 
     UIWindowScene *scene = anchor.windowScene;
@@ -274,6 +282,7 @@ static const CGFloat kFloatingIdleAlpha = 0.45;
     NSData *data = [NSJSONSerialization dataWithJSONObject:request options:0 error:nil];
     if ([data writeToURL:[directory URLByAppendingPathComponent:@"request.json"] options:NSDataWritingAtomic error:nil]) {
         [self hide];
+        if ([action isEqualToString:@"close"]) [self hideFloatingHomeButton];
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.strata.controls.request"), NULL, NULL, true);
     } else { [self showError:@"The app controls request could not be saved. Return to Strata and reopen this app."]; }
 }
@@ -295,9 +304,11 @@ static const CGFloat kFloatingIdleAlpha = 0.45;
     } else [self request:@"library"];
 }
 - (void)showError:(NSString *)message {
+    UIViewController *presenter = self.panel.rootViewController ?: self.floatingWindow.rootViewController ?: UIApplication.sharedApplication.keyWindow.rootViewController;
+    if (!presenter) return;
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"App controls unavailable" message:message preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-    [self.panel.rootViewController presentViewController:alert animated:YES completion:nil];
+    [presenter presentViewController:alert animated:YES completion:nil];
 }
 - (UIButton *)button:(NSString *)title action:(void (^)(void))action {
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
