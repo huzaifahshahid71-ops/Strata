@@ -808,6 +808,7 @@ class AppInfoProvider {
                     } else { self.revealControls() }
                 } }
             }
+            Task { @MainActor in LiveBoardOrientation.restoreHostOrientation() }
             return
         }
         if #available(iOS 16.1, *), let vc = MultitaskWindowManager.guestControllers.object(forKey: NSNumber(value: pid)) {

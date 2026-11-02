@@ -775,6 +775,28 @@
     [self save];
 }
 
+- (bool)launchWithGameMode {
+    return [_info[@"launchWithGameMode"] boolValue];
+}
+
+- (void)setLaunchWithGameMode:(bool)launchWithGameMode {
+    _info[@"launchWithGameMode"] = [NSNumber numberWithBool:launchWithGameMode];
+    [self save];
+}
+
+- (bool)launchWithMetalHUD {
+    return [_info[@"launchWithMetalHUD"] boolValue];
+}
+
+- (void)setLaunchWithMetalHUD:(bool)launchWithMetalHUD {
+    _info[@"launchWithMetalHUD"] = [NSNumber numberWithBool:launchWithMetalHUD];
+    [self save];
+}
+
+- (bool)isGameModeSupportDeclared {
+    return [_infoPlist[@"LSSupportsGameMode"] boolValue] && [_infoPlist[@"GCSupportsGameMode"] boolValue];
+}
+
 - (NSDate*)lastLaunched {
     return _info[@"lastLaunched"];
 }

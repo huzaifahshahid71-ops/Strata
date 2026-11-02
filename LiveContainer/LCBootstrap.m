@@ -303,10 +303,14 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
     }
     
     NSString *hudKey = [NSString stringWithFormat:@"%@:%@", isSharedBundle ? @"shared" : @"local", selectedApp ?: @"builtin:sidestore"];
-    NSMutableDictionary *hudRequests = [[lcSharedDefaults dictionaryForKey:@"StrataMetalHUDApps"] mutableCopy] ?: [NSMutableDictionary new];
-    BOOL strataMetalHUD = [hudRequests[hudKey] boolValue];
-    [hudRequests removeObjectForKey:hudKey];
-    [lcSharedDefaults setObject:hudRequests forKey:@"StrataMetalHUDApps"];
+    NSDictionary *hudRequests = [lcSharedDefaults dictionaryForKey:@"StrataMetalHUDApps"];
+    // One-shot request from a launch action, or the persistent per-app "Launch with Metal HUD" setting.
+    BOOL strataMetalHUD = [hudRequests[hudKey] boolValue] || [guestAppInfo[@"launchWithMetalHUD"] boolValue];
+    if (hudRequests[hudKey] != nil) {
+        NSMutableDictionary *mutableHudRequests = [hudRequests mutableCopy];
+        [mutableHudRequests removeObjectForKey:hudKey];
+        [lcSharedDefaults setObject:mutableHudRequests forKey:@"StrataMetalHUDApps"];
+    }
     if (strataMetalHUD) setenv("MTL_HUD_ENABLED", "1", 1);
 
     if([guestAppInfo[@"doUseLCBundleId"] boolValue] ) {

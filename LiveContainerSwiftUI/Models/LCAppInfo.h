@@ -43,6 +43,9 @@ typedef NS_ENUM(NSInteger, MultitaskSpecified){
 @property bool autoSaveDisabled;
 @property bool dontSign;
 @property bool spoofSDKVersion;
+@property bool launchWithGameMode;
+@property bool launchWithMetalHUD;
+@property (nonatomic, readonly) bool isGameModeSupportDeclared;
 @property (nonatomic, strong) NSString* jitLaunchScriptJs;
 @property (nonatomic, strong) NSString* selected32BitEmulator;
 @property NSDate* lastLaunched;

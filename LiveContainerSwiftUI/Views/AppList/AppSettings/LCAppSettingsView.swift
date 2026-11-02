@@ -144,11 +144,19 @@ struct LCAppSettingsView: View {
             
             
             Section {
-                Text("Launch in Game Mode declares support and requests a fullscreen launch. iOS controls activation; check Game Overlay in Control Center. This does not grant extra RAM.").font(.footnote).foregroundStyle(.secondary)
                 Toggle(isOn: $model.uiIsJITNeeded) {
                     Text("lc.appSettings.launchWithJit".loc)
                 }
                 .disabled(model.uiIs32bit)
+                Toggle(isOn: $model.uiLaunchWithGameMode) {
+                    Text("Launch with Game Mode")
+                }
+                .disabled(appInfo is BuiltInSideStoreAppInfo)
+                Toggle(isOn: $model.uiLaunchWithMetalHUD) {
+                    Text("Launch with Metal HUD")
+                }
+                .disabled(appInfo is BuiltInSideStoreAppInfo)
+                Text("Game Mode declares support and requests a fullscreen launch. iOS controls activation; check Game Overlay in Control Center. This does not grant extra RAM. Metal HUD shows the performance overlay for apps that render with Metal. Both options apply on every normal launch and work together with JIT.").font(.footnote).foregroundStyle(.secondary)
                 if #available(iOS 26.0, *) {
                     Picker("JIT script", selection: Binding(get: { model.strataJITScriptMode }, set: { model.strataJITScriptMode = $0 })) {
                         ForEach(StrataJITScriptMode.allCases) { mode in Text(mode.title).tag(mode) }
