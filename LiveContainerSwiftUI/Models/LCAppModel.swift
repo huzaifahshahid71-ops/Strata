@@ -115,6 +115,18 @@ class LCAppModel: ObservableObject, Hashable {
         }
     }
     
+    @Published var uiLaunchWithGameMode : Bool {
+        didSet {
+            appInfo.launchWithGameMode = uiLaunchWithGameMode
+        }
+    }
+    
+    @Published var uiLaunchWithMetalHUD : Bool {
+        didSet {
+            appInfo.launchWithMetalHUD = uiLaunchWithMetalHUD
+        }
+    }
+    
     @Published var uiRemark : String {
         didSet {
             appInfo.remark = uiRemark
@@ -191,6 +203,8 @@ class LCAppModel: ObservableObject, Hashable {
         self.jitLaunchScriptJs = appInfo.jitLaunchScriptJs
         self.uiSelected32BitEmulator = appInfo.selected32BitEmulator ?? ""
         self.uiSpoofSDKVersion = appInfo.spoofSDKVersion
+        self.uiLaunchWithGameMode = appInfo.launchWithGameMode
+        self.uiLaunchWithMetalHUD = appInfo.launchWithMetalHUD
         self.uiRemark = appInfo.remark ?? ""
         self.uiIs32bit = appInfo.is32bit
         self.uiIs32bitEmulator = appInfo.is32bitEmulator
