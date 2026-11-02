@@ -317,17 +317,30 @@
     }
 }
 
+- (void)restoreHostAppearanceAndOrientation:(UIViewController *)root windowScene:(UIWindowScene *)windowScene {
+    [root setNeedsStatusBarAppearanceUpdate];
+    [root setNeedsUpdateOfHomeIndicatorAutoHidden];
+    [root setNeedsUpdateOfSupportedInterfaceOrientations];
+    if (windowScene) {
+        NSString *mode = [NSUserDefaults.lcSharedDefaults stringForKey:@"LiveBoardMode"] ?: @"ios";
+        UIInterfaceOrientationMask hostMask = ([mode isEqualToString:@"cinematic"] || [mode isEqualToString:@"bigPicture"]) ? UIInterfaceOrientationMaskLandscape : UIInterfaceOrientationMaskPortrait;
+        [windowScene requestGeometryUpdateWithPreferences:[[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:hostMask] errorHandler:^(NSError *error) {}];
+    }
+    [NSNotificationCenter.defaultCenter postNotificationName:@"LiveBoardResumeController" object:nil];
+}
+
 - (void)minimizeWindow {
     if (self.immersivePresented) {
         UIViewController *root = self.presentingViewController;
+        UIWindowScene *windowScene = self.view.window.windowScene ?: root.view.window.windowScene;
+        self.immersivePresented = NO;
+        MultitaskDockManager.shared.immersiveGuestActive = NO;
         [self dismissViewControllerAnimated:NO completion:^{
-            self.immersivePresented = NO;
-            MultitaskDockManager.shared.immersiveGuestActive = NO;
             [MultitaskDockManager.shared.windowHostingView addSubview:self.view];
             [root addChildViewController:self];
             [self didMoveToParentViewController:root];
             self.view.hidden = YES;
-            [NSNotificationCenter.defaultCenter postNotificationName:@"LiveBoardResumeController" object:nil];
+            [self restoreHostAppearanceAndOrientation:root windowScene:windowScene];
         }];
         return;
     }
@@ -407,11 +420,13 @@
 
 - (void)appSceneVCAppDidExit:(AppSceneViewController*)vc {
     if (self.immersivePresented) {
+        UIViewController *root = self.presentingViewController;
+        UIWindowScene *windowScene = self.view.window.windowScene ?: root.view.window.windowScene;
         self.immersivePresented = NO;
+        MultitaskDockManager.shared.immersiveGuestActive = NO;
         [MultitaskDockManager.shared removeRunningApp:self.dataUUID];
         [self dismissViewControllerAnimated:NO completion:^{
-            MultitaskDockManager.shared.immersiveGuestActive = NO;
-            [NSNotificationCenter.defaultCenter postNotificationName:@"LiveBoardResumeController" object:nil];
+            [self restoreHostAppearanceAndOrientation:root windowScene:windowScene];
         }];
         return;
     }

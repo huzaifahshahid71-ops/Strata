@@ -16,16 +16,56 @@ static const CGFloat kFloatingIdleAlpha = 0.45;
 @implementation StrataControlsWindow
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hit = [super hitTest:point withEvent:event];
-    return hit == self.rootViewController.view ? nil : hit;
+    return (hit == self || hit == self.rootViewController.view) ? nil : hit;
 }
 @end
+
+@interface StrataFloatingWindow : StrataControlsWindow
+@end
+@implementation StrataFloatingWindow
+- (BOOL)canBecomeKeyWindow { return NO; }
+- (void)makeKeyWindow {}
+- (BOOL)_canAffectStatusBarAppearance { return NO; }
+- (BOOL)_shouldControlAutorotation { return NO; }
+@end
+
 @interface StrataControlsController : UIViewController
 @property(nonatomic) UIInterfaceOrientationMask orientationMask;
-@property(nonatomic, copy) void (^onLayout)(void);
 @end
 @implementation StrataControlsController
 - (BOOL)prefersStatusBarHidden { return YES; }
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations { return self.orientationMask ?: UIInterfaceOrientationMaskAllButUpsideDown; }
+@end
+
+@interface StrataFloatingController : UIViewController
+@property(nonatomic, copy) void (^onLayout)(void);
+@end
+@implementation StrataFloatingController
+- (UIViewController *)activeGuestViewController {
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            if (!window.hidden && ![window isKindOfClass:StrataControlsWindow.class] && window.rootViewController) {
+                return window.rootViewController;
+            }
+        }
+    }
+    return nil;
+}
+- (UIViewController *)childViewControllerForStatusBarStyle {
+    return [self activeGuestViewController];
+}
+- (UIViewController *)childViewControllerForStatusBarHidden {
+    return [self activeGuestViewController];
+}
+- (BOOL)prefersStatusBarHidden {
+    UIViewController *guest = [self activeGuestViewController];
+    return guest ? guest.prefersStatusBarHidden : NO;
+}
+- (UIStatusBarStyle)preferredStatusBarStyle {
+    UIViewController *guest = [self activeGuestViewController];
+    return guest ? guest.preferredStatusBarStyle : UIStatusBarStyleDefault;
+}
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     if (self.onLayout) self.onLayout();
@@ -191,14 +231,13 @@ static const CGFloat kFloatingIdleAlpha = 0.45;
 
     UIWindowScene *scene = anchor.windowScene;
     CGRect frame = scene ? scene.coordinateSpace.bounds : (CGRectIsEmpty(anchor.bounds) ? UIScreen.mainScreen.bounds : anchor.bounds);
-    StrataControlsWindow *window = scene ? [[StrataControlsWindow alloc] initWithWindowScene:scene] : [[StrataControlsWindow alloc] initWithFrame:frame];
+    StrataFloatingWindow *window = scene ? [[StrataFloatingWindow alloc] initWithWindowScene:scene] : [[StrataFloatingWindow alloc] initWithFrame:frame];
     window.frame = frame;
     window.accessibilityIdentifier = @"strata.floatingHome.window";
-    window.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
-    window.windowLevel = UIWindowLevelAlert + 2;
+    window.windowLevel = UIWindowLevelStatusBar - 1;
     window.backgroundColor = UIColor.clearColor;
 
-    StrataControlsController *controller = [StrataControlsController new];
+    StrataFloatingController *controller = [StrataFloatingController new];
     __weak typeof(self) weakSelf = self;
     controller.onLayout = ^{ [weakSelf layoutFloatingButtonAnimated:NO]; };
     window.rootViewController = controller;
@@ -213,6 +252,7 @@ static const CGFloat kFloatingIdleAlpha = 0.45;
     UIVisualEffect *effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterialDark];
     if (@available(iOS 26.0, *)) effect = [UIGlassEffect effectWithStyle:UIGlassEffectStyleRegular];
     UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:effect];
+    blur.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
     blur.frame = container.bounds;
     blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     blur.layer.cornerRadius = kFloatingButtonSize * 0.5;
@@ -256,6 +296,23 @@ static const CGFloat kFloatingIdleAlpha = 0.45;
     window.hidden = NO;
     [self scheduleFloatingIdleFade];
 }
+- (void)restorePortraitOrientation {
+    if (@available(iOS 16.0, *)) {
+        UIWindowSceneGeometryPreferencesIOS *prefs = [[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:UIInterfaceOrientationMaskPortrait];
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (![scene isKindOfClass:UIWindowScene.class]) continue;
+            UIWindowScene *windowScene = (UIWindowScene *)scene;
+            for (UIWindow *window in windowScene.windows) {
+                [window.rootViewController setNeedsUpdateOfSupportedInterfaceOrientations];
+            }
+            [windowScene requestGeometryUpdateWithPreferences:prefs errorHandler:^(NSError *error) {}];
+        }
+    }
+    @try {
+        [UIDevice.currentDevice setValue:@(UIInterfaceOrientationPortrait) forKey:@"orientation"];
+        [UIViewController attemptRotationToDeviceOrientation];
+    } @catch (NSException *exception) {}
+}
 - (void)request:(NSString *)action {
     if (self.hostMode) {
         [self hide];
@@ -265,6 +322,7 @@ static const CGFloat kFloatingIdleAlpha = 0.45;
     if (!self.separateProcess) {
         [self hide];
         [self hideFloatingHomeButton];
+        [self restorePortraitOrientation];
         // A normal guest owns the main process. Use the existing self-relaunch
         // path to return to the launcher, without requiring a manual force-quit.
         [NSUserDefaults.lcUserDefaults removeObjectForKey:@"selected"];
