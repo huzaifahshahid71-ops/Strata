@@ -7,7 +7,7 @@ struct LiveBoardArtworkFiles {
     private let fm = FileManager.default
 
     func prepare() throws {
-        for mode in ["Cinematic", "Big Picture"] {
+        for mode in ["Cinematic", "Big Picture", "Switchboard"] {
             for kind in ["Covers", "Portraits", "Backgrounds"] {
                 try fm.createDirectory(at: directory.appendingPathComponent(mode).appendingPathComponent(kind), withIntermediateDirectories: true)
             }
@@ -27,8 +27,8 @@ struct LiveBoardArtworkFiles {
         return fm.fileExists(atPath: old.path) ? old : nil
     }
     static func folder(mode: String, kind: String) -> String? {
-        guard ["cinematic", "bigPicture"].contains(mode), ["cover", "portrait", "background"].contains(kind) else { return nil }
-        let interface = mode == "cinematic" ? "Cinematic" : "Big Picture"
+        guard ["cinematic", "bigPicture", "switchboard"].contains(mode), ["cover", "portrait", "background"].contains(kind) else { return nil }
+        let interface = mode == "cinematic" ? "Cinematic" : mode == "switchboard" ? "Switchboard" : "Big Picture"
         let type = kind == "cover" ? "Covers" : kind == "portrait" ? "Portraits" : "Backgrounds"
         return interface + "/" + type
     }
@@ -43,7 +43,7 @@ struct LiveBoardArtworkFiles {
             // Entries already migrated remain assigned even if the user removes a file in Files.
             guard !filename.contains("/"), let source = existingURL(filename) else { continue }
             let parts = id.split(separator: ":", maxSplits: 2).map(String.init)
-            let modern = parts.count == 3 && ["cinematic", "bigPicture"].contains(parts[0])
+            let modern = parts.count == 3 && ["cinematic", "bigPicture", "switchboard"].contains(parts[0])
             let mode = modern ? parts[0] : "bigPicture"
             let kind = modern ? parts[1] : parts.first ?? ""
             let key = modern ? parts[2] : String(id.dropFirst(kind.count + 1))

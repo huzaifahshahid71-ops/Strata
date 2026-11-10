@@ -1,4 +1,5 @@
 #import "StrataRuntimePath.h"
+#import <AVFoundation/AVFoundation.h>
 #import "StrataProcessMemory.h"
 #import "StrataGuestControls.h"
 #import "FoundationPrivate.h"
@@ -636,6 +637,21 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
         [NSUserDefaults.standardUserDefaults setVolatileDomain:hudArguments forName:NSArgumentDomain];
     }
 
+    // Explicit per-guest opt-in. No constructor/global injection into Strata or SideStore.
+    if (!isSideStore) {
+        NSString *fgJSON = [lcSharedDefaults stringForKey:@"StrataFrameGenApps"];
+        NSDictionary *fgApps = fgJSON ? [NSJSONSerialization JSONObjectWithData:[fgJSON dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil] : nil;
+        NSDictionary *fgConfig = [fgApps isKindOfClass:NSDictionary.class] ? fgApps[hudKey] : nil;
+        if ([fgConfig isKindOfClass:NSDictionary.class] && [@[@"2x", @"benchmark"] containsObject:fgConfig[@"mode"]]) {
+            NSString *library = [lcMainBundle.bundlePath stringByAppendingPathComponent:@"Frameworks/StrataFrameGen.dylib"];
+            if (![fm fileExistsAtPath:library]) library = [lcMainBundle.bundlePath stringByAppendingPathComponent:@"../../Frameworks/StrataFrameGen.dylib"];
+            void *fg = dlopen(library.UTF8String, RTLD_NOW | RTLD_LOCAL);
+            void (*startFG)(NSDictionary *, NSString *) = fg ? dlsym(fg, "StrataFrameGenStart") : NULL;
+            if (startFG) startFG(fgConfig, [[LCSharedUtils appGroupPath].path stringByAppendingPathComponent:@"Library/StrataFrameGen"]);
+            else NSLog(@"[Strata] Frame generation unavailable: %s", dlerror());
+        }
+    }
+
     // Attempt to load the bundle. 32-bit bundle will always fail because of 32-bit main executable, so ignore it
     if (!is32bit && ![appBundle loadAndReturnError:&error]) {
         appError = error.localizedDescription;
@@ -675,6 +691,41 @@ static void exceptionHandler(NSException *exception) {
     } else {
         [lcUserDefaults setObject:error forKey:@"error"];
     }
+}
+
+// Optional keep-alive: a looping silent, mixable sound while an in-process guest is in the background keeps iOS
+// from suspending it, so a short trip to another app no longer loses game progress. Opt-in (battery cost);
+// iOS can still terminate it under memory pressure. The guest's own audio session settings are restored.
+static AVAudioPlayer *strataKeepAlivePlayer;
+static AVAudioSessionCategory strataSavedCategory;
+static AVAudioSessionMode strataSavedMode;
+static AVAudioSessionCategoryOptions strataSavedOptions;
+static NSData *StrataSilentWAV(void) {
+    const uint32_t rate = 8000, samples = 8000, dataSize = samples * 2;
+    NSMutableData *data = [NSMutableData dataWithCapacity:44 + dataSize];
+    uint32_t chunk = 36 + dataSize, fmtSize = 16, byteRate = rate * 2; uint16_t pcm = 1, channels = 1, align = 2, bits = 16;
+    [data appendBytes:"RIFF" length:4]; [data appendBytes:&chunk length:4]; [data appendBytes:"WAVEfmt " length:8];
+    [data appendBytes:&fmtSize length:4]; [data appendBytes:&pcm length:2]; [data appendBytes:&channels length:2];
+    [data appendBytes:&rate length:4]; [data appendBytes:&byteRate length:4]; [data appendBytes:&align length:2]; [data appendBytes:&bits length:2];
+    [data appendBytes:"data" length:4]; [data appendBytes:&dataSize length:4]; [data increaseLengthBy:dataSize];
+    return data;
+}
+static void StrataKeepAliveStart(void) {
+    if (strataKeepAlivePlayer || ![lcSharedDefaults boolForKey:@"StrataKeepGuestAlive"]) return;
+    AVAudioSession *session = AVAudioSession.sharedInstance;
+    strataSavedCategory = session.category; strataSavedMode = session.mode; strataSavedOptions = session.categoryOptions;
+    NSError *error = nil;
+    if (![session setCategory:AVAudioSessionCategoryPlayback mode:AVAudioSessionModeDefault options:AVAudioSessionCategoryOptionMixWithOthers error:&error] || ![session setActive:YES error:&error]) {
+        NSLog(@"[Strata] keep-alive audio session failed: %@", error); return;
+    }
+    strataKeepAlivePlayer = [[AVAudioPlayer alloc] initWithData:StrataSilentWAV() error:&error];
+    strataKeepAlivePlayer.numberOfLoops = -1; strataKeepAlivePlayer.volume = 0;
+    if (![strataKeepAlivePlayer play]) { NSLog(@"[Strata] keep-alive player failed: %@", error); strataKeepAlivePlayer = nil; }
+}
+static void StrataKeepAliveStop(void) {
+    if (!strataKeepAlivePlayer) return;
+    [strataKeepAlivePlayer stop]; strataKeepAlivePlayer = nil;
+    if (strataSavedCategory) [AVAudioSession.sharedInstance setCategory:strataSavedCategory mode:(strataSavedMode ?: AVAudioSessionModeDefault) options:strataSavedOptions error:nil];
 }
 
 int LiveContainerMain(int argc, char *argv[]) {
@@ -744,6 +795,8 @@ int LiveContainerMain(int argc, char *argv[]) {
     [NSFileManager.defaultManager createDirectoryAtPath:@(getenv("TMPDIR")) withIntermediateDirectories:YES attributes:nil error:nil];
     
     if([selectedApp isEqualToString:@"ui"]) {
+        // Deliberate return to the launcher: never auto-resume the previous guest.
+        [lcUserDefaults removeObjectForKey:@"StrataResumeGuest"];
         selectedApp = nil;
         [lcUserDefaults removeObjectForKey:@"selected"];
         [lcUserDefaults removeObjectForKey:@"selectedContainer"];
@@ -812,6 +865,41 @@ int LiveContainerMain(int argc, char *argv[]) {
         });
 
     }
+    // Consume the request before any work: a timeout must return to the launcher,
+    // never repeatedly attach or leave the user in a cold-start loop.
+    NSDictionary *hostJITRequest = [lcUserDefaults dictionaryForKey:@"StrataHostJITRequest"];
+    [lcUserDefaults removeObjectForKey:@"StrataHostJITRequest"];
+    if (selectedApp && selectedContainer && !isSideStore) {
+        NSString *dataFailure = [LCSharedUtils strataAcquireGuestDataLease:selectedContainer];
+        if (dataFailure) {
+            if (isLiveProcess) {
+                NSExtensionContext *context = [NSClassFromString(@"LiveProcessHandler") extensionContext];
+                [context cancelRequestWithError:[NSError errorWithDomain:@"StrataDataLease" code:1 userInfo:@{NSLocalizedDescriptionKey:dataFailure}]];
+                return 1;
+            }
+            [lcUserDefaults setObject:dataFailure forKey:@"error"];
+            [lcUserDefaults removeObjectForKey:@"selected"];
+            [lcUserDefaults removeObjectForKey:@"selectedContainer"];
+            selectedApp = nil; selectedContainer = nil;
+        }
+    }
+    if (hostJITRequest && !isLiveProcess && !isSideStore && selectedApp) {
+        NSTimeInterval age = NSDate.date.timeIntervalSince1970 - [hostJITRequest[@"created"] doubleValue];
+        NSString *failure = nil;
+        if (age < 0 || age > 45 || ![hostJITRequest[@"app"] isEqual:selectedApp] || ![hostJITRequest[@"container"] isEqual:selectedContainer]) {
+            failure = @"The HostJIT startup request expired or did not match this guest. Retry from the launcher.";
+        } else {
+            @try { failure = [LCSharedUtils strataAttachHostJIT:hostJITRequest]; }
+            @catch (NSException *exception) { [LCSharedUtils strataStopHostJIT]; failure = @"HostJIT could not start its helper during cold startup. Disable the experiment and use the existing guest-extension JIT path."; }
+        }
+        if (failure) {
+            [LCSharedUtils strataReleaseGuestDataLease];
+            [lcUserDefaults setObject:failure forKey:@"error"];
+            [lcUserDefaults removeObjectForKey:@"selected"];
+            [lcUserDefaults removeObjectForKey:@"selectedContainer"];
+            selectedApp = nil; selectedContainer = nil;
+        }
+    }
     NSSetUncaughtExceptionHandler(&exceptionHandler);
     if (selectedApp || isSideStore) {
         [lcUserDefaults removeObjectForKey:@"selected"];
@@ -828,6 +916,20 @@ int LiveContainerMain(int argc, char *argv[]) {
         NSString *controlsName = [controlsBundle objectForInfoDictionaryKey:@"CFBundleDisplayName"] ?: [controlsBundle objectForInfoDictionaryKey:@"CFBundleName"] ?: selectedApp ?: @"SideStore";
         NSString *controlsKey = selectedApp ? [NSString stringWithFormat:@"%@:%@", controlsShared ? @"shared" : @"local", selectedApp] : @"builtin:sidestore";
         StrataStartGuestControlsWithIdentity([LCSharedUtils appGroupID], controlsName, isLiveProcess, controlsKey);
+        // iOS often terminates a backgrounded game to reclaim memory; the next cold start would then show the
+        // launcher. Remember the guest only while it is in the background so the launcher can reopen it.
+        [lcUserDefaults removeObjectForKey:@"StrataResumeGuest"];
+        if (!isLiveProcess && selectedApp && !isSideStore) {
+            NSString *resumeKey = controlsKey;
+            [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidEnterBackgroundNotification object:nil queue:nil usingBlock:^(NSNotification *note) {
+                [lcUserDefaults setObject:@{@"key": resumeKey, @"time": @(NSDate.date.timeIntervalSince1970)} forKey:@"StrataResumeGuest"];
+                StrataKeepAliveStart();
+            }];
+            [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationWillEnterForegroundNotification object:nil queue:nil usingBlock:^(NSNotification *note) {
+                [lcUserDefaults removeObjectForKey:@"StrataResumeGuest"];
+                StrataKeepAliveStop();
+            }];
+        }
         NSString *appError = invokeAppMain(selectedApp, selectedContainer, argc, argv);
         if (appError) {
             if(isLiveProcess) {

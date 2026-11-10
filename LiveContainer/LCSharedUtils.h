@@ -5,6 +5,13 @@
 + (NSString *)appGroupID;
 + (NSURL*) appGroupPath;
 + (NSString *)certificatePassword;
++ (NSDictionary *)strataSigningIdentity;
++ (BOOL)strataStoreSigningIdentity:(NSData *)p12 password:(NSString *)password error:(NSError **)error;
++ (BOOL)strataRemoveSigningIdentityWithError:(NSError **)error;
++ (void)strataStopHostJIT;
++ (NSString *)strataAttachHostJIT:(NSDictionary *)request;
++ (void)strataReleaseGuestDataLease;
++ (NSString *)strataAcquireGuestDataLease:(NSString *)container;
 + (BOOL)launchToGuestAppWithClassicMode:(NSUInteger)classicMode;
 + (BOOL)launchToGuestAppWithURL:(NSURL *)url;
 + (void)setWebPageUrlForNextLaunch:(NSString*)urlString;

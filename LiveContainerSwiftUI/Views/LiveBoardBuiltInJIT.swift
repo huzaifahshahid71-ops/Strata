@@ -58,8 +58,12 @@ enum LiveBoardBuiltInJIT {
         let token = UUID().uuidString
         let status = root.appendingPathComponent("Library/StrataJIT/\(token).json")
         var helper: NSObject?
+        preferences.set(Date().timeIntervalSince1970 + 30, forKey: "StrataJITVPNActiveUntil")
+        preferences.set(getpid(), forKey: "StrataJITVPNOwnerPID")
         defer {
             if let helper { LCUtils.strataStopJITHelper(helper) }
+            preferences.removeObject(forKey: "StrataJITVPNActiveUntil")
+            preferences.removeObject(forKey: "StrataJITVPNOwnerPID")
             try? FileManager.default.removeItem(at: status)
         }
         do {
@@ -78,6 +82,7 @@ enum LiveBoardBuiltInJIT {
                     return false
                 }
                 try Task.checkCancellation()
+                preferences.set(Date().timeIntervalSince1970 + 30, forKey: "StrataJITVPNActiveUntil")
                 if operation == "enable", let bytes = try? Data(contentsOf: guestStatus),
                    let record = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
                    record["token"] as? String == expectedToken,

@@ -7,27 +7,45 @@ enum StrataControlsLibrary {
         guard let group = LCSharedUtils.appGroupID() else { return nil }
         return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group)?.appendingPathComponent("Library/StrataControls")
     }
+    @MainActor private static var publishTask: Task<Void, Never>?
+    @MainActor private static var iconCache: [String: String] = [:]
+    @MainActor private static var previousData: Data?
     @MainActor private static var cachedApps: [LCAppModel] = []
     @MainActor static func refreshRunning() { if !cachedApps.isEmpty { publish(cachedApps) } }
     @MainActor static func publish(_ apps: [LCAppModel]) {
         cachedApps = apps
-        guard let root else { return }
+        publishTask?.cancel()
+        publishTask = Task { @MainActor in
+        await Task.yield()
+        guard !Task.isCancelled, let root else { return }
         do {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-            let entries: [[String: String]] = apps.map { app in
+            var entries: [[String: String]] = []
+            var keep = Set<String>()
+            for app in apps {
+                guard !Task.isCancelled else { return }
+                let iconKey = liveBoardAppKey(app) + ":" + String(LiveBoardAppCustomization.shared.revision) + ":" + String(StrataPhoneApps.shared.revision)
+                keep.insert(iconKey)
                 let running: Bool
                 if #available(iOS 16.0, *), let folder = app.uiSelectedContainer?.folderName { running = MultitaskManager.isUsing(container: folder) || MultitaskDockManager.shared.apps.contains(where: { $0.appUUID == folder }) }
                 else { running = false }
                 var entry = ["key": liveBoardAppKey(app), "name": LiveBoardAppCustomization.shared.name(app), "running": running ? "1" : "0"]
-                if let image = LiveBoardIconStore.image(app, dark: false) {
+                if let encoded = iconCache[iconKey] { entry["icon"] = encoded }
+                else if let image = LiveBoardIconStore.image(app, dark: false) {
                     let format = UIGraphicsImageRendererFormat(); format.scale = 1
                     let small = UIGraphicsImageRenderer(size: CGSize(width: 120, height: 120), format: format).image { _ in image.draw(in: CGRect(x: 0, y: 0, width: 120, height: 120)) }
-                    entry["icon"] = small.pngData()?.base64EncodedString()
+                    let encoded = small.pngData()?.base64EncodedString()
+                    entry["icon"] = encoded; iconCache[iconKey] = encoded
                 }
-                return entry
+                entries.append(entry)
+                if entries.count % 4 == 0 { await Task.yield() }
             }
-            try JSONSerialization.data(withJSONObject: entries).write(to: root.appendingPathComponent("library.json"), options: .atomic)
+            guard !Task.isCancelled else { return }
+            iconCache = iconCache.filter { keep.contains($0.key) }
+            let data = try JSONSerialization.data(withJSONObject: entries, options: .sortedKeys)
+            if data != previousData { try data.write(to: root.appendingPathComponent("library.json"), options: .atomic); previousData = data }
         } catch { NSLog("Strata controls snapshot: %@", error.localizedDescription) }
+        }
     }
     struct Entry: Identifiable { let id: String; let name: String; let icon: UIImage? }
     static func entries() -> [Entry] {

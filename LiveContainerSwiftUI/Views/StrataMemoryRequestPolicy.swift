@@ -21,4 +21,8 @@ enum StrataMemoryRequestPolicy {
         return [host, guest]
     }
     static let capabilities = ["INCREASED_MEMORY_LIMIT"]
+    /// RAM bypass: Apple's Increased Debugging Memory Limit raises the jetsam limit above the regular
+    /// increased limit while a debugger is attached (JIT launches attach one). Requested separately so a
+    /// refusal never affects the regular request.
+    static let bypassCapabilities = ["INCREASED_MEMORY_LIMIT", "INCREASED_MEMORY_LIMIT_DEBUGGING"]
 }

@@ -286,6 +286,9 @@
     };
 }
 
+- (BOOL)gameModeSupportDeclared {
+    return [_infoPlist[@"LSSupportsGameMode"] boolValue] && [_infoPlist[@"GCSupportsGameMode"] boolValue];
+}
 - (BOOL)enableGameModeSupportWithError:(NSError **)error {
     NSMutableDictionary *updated = _infoPlist.mutableCopy;
     updated[@"LSSupportsGameMode"] = @YES;

@@ -37,10 +37,11 @@ struct LiveBoardConsoleScreen: View {
     @State private var managingCategories = false
     @State private var newCategory = ""
     @StateObject private var audio = LiveBoardNavigationAudio()
-    private var libraries: [String: LiveBoardModeLibrary] { (try? JSONDecoder().decode([String: LiveBoardModeLibrary].self, from: Data(modeLibraries.utf8))) ?? [:] }
-    private var library: LiveBoardModeLibrary { libraries[mode] ?? LiveBoardModeLibrary() }
+    private var libraries: [String: LiveBoardModeLibrary] { LiveBoardLibraryCache.decode(modeLibraries) }
+    @AppStorage(LiveBoardSharedCategories.enabledKey, store: LCUtils.appGroupUserDefault) private var universalCategories = true
+    private var library: LiveBoardModeLibrary { _ = universalCategories; return LiveBoardSharedCategories.library(libraries, mode: mode) }
     private func updateLibrary(_ action: (inout LiveBoardModeLibrary) -> Void) {
-        var all = libraries; var state = library; action(&state); all[mode] = state
+        var all = libraries; var state = library; action(&state); LiveBoardSharedCategories.store(state, mode: mode, into: &all)
         if let data = try? JSONEncoder().encode(all), let text = String(data: data, encoding: .utf8) { modeLibraries = text }
     }
     @State private var navigation = LiveBoardConsoleNavigation()
@@ -54,6 +55,19 @@ struct LiveBoardConsoleScreen: View {
     @State private var picker: ArtworkRequest?
     @State private var artworkError: String?
 
+    @State private var backdropTop: BackdropLayer?
+    private struct BackdropLayer: Equatable {
+        let id: String
+        let image: UIImage
+        let iconApp: LCAppModel?
+        static func == (lhs: Self, rhs: Self) -> Bool { lhs.id == rhs.id }
+    }
+    private enum BackdropTarget {
+        case pending, empty, layer(BackdropLayer)
+        var id: String {
+            switch self { case .pending: return "pending"; case .empty: return "empty"; case .layer(let layer): return layer.id }
+        }
+    }
     private struct ArtworkRequest: Identifiable {
         let key: String
         let kind: LiveBoardArtworkStore.Kind
@@ -61,9 +75,11 @@ struct LiveBoardConsoleScreen: View {
     }
     private var favoriteKeys: [String] { (try? JSONDecoder().decode([String].self, from: Data(favorites.utf8))) ?? [] }
     private var visibleApps: [LCAppModel] {
-        apps.filter { app in
+        let state = library
+        let favorites = Set(favoriteKeys)
+        return apps.filter { app in
             let key = liveBoardAppKey(app)
-            return !library.hidden.contains(key) && (!favoritesOnly || favoriteKeys.contains(key)) && (activeCategory == nil || library.assignments[key] == activeCategory)
+            return !state.hidden.contains(key) && (!favoritesOnly || favorites.contains(key)) && (activeCategory == nil || state.assignments[key] == activeCategory)
         }
     }
     private var selected: LCAppModel? { visibleApps.indices.contains(navigation.selectedIndex) ? visibleApps[navigation.selectedIndex] : visibleApps.first }
@@ -75,7 +91,8 @@ struct LiveBoardConsoleScreen: View {
             let landscape = geometry.size.width > geometry.size.height
             let iconScale = min(CGFloat(consoleLayout.iconScale), max(0.65, (geometry.size.height - 180) / 126))
             ZStack {
-                if let app = selected, artwork.image(for: liveBoardAppKey(app), kind: .background, mode: mode) == nil {
+                // Follows the displayed backdrop, so it never appears while assigned artwork is decoding.
+                if let app = backdropTop?.iconApp {
                     LiveBoardIconImage(app: app, dark: darkIcons)
                         .frame(width: landscape ? 190 : 148, height: landscape ? 190 : 148)
                         .clipShape(RoundedRectangle(cornerRadius: 34, style: .continuous))
@@ -83,6 +100,8 @@ struct LiveBoardConsoleScreen: View {
                         .opacity(0.75)
                         .position(x: geometry.size.width * 0.78, y: geometry.size.height * 0.5)
                         .allowsHitTesting(false)
+                        .id(liveBoardAppKey(app))
+                        .transition(.opacity)
                 }
                 VStack(alignment: .leading, spacing: 0) {
                     header(landscape: landscape).padding(.top, 4)
@@ -171,23 +190,52 @@ struct LiveBoardConsoleScreen: View {
         .onChange(of: keys) { _ in navigation.selectedIndex = min(navigation.selectedIndex, max(0, visibleApps.count - 1)) }
     }
 
+    /// What the backdrop should show for the current selection.
+    /// `.pending` means assigned artwork is still decoding: keep the outgoing image on screen
+    /// instead of flashing the icon-derived fallback for a frame or two.
+    private var backdropTarget: BackdropTarget {
+        guard let app = selected else { return .empty }
+        let key = liveBoardAppKey(app)
+        if let image = artwork.image(for: key, kind: .background, mode: mode) {
+            return .layer(BackdropLayer(id: "art:\(key):\(ObjectIdentifier(image).hashValue)", image: image, iconApp: nil))
+        }
+        if artwork.hasArtwork(for: key, kind: .background, mode: mode) { return .pending }
+        if let image = LiveBoardIconStore.background(app, dark: darkIcons) {
+            return .layer(BackdropLayer(id: "icon:\(key):\(ObjectIdentifier(image).hashValue)", image: image, iconApp: app))
+        }
+        return .empty
+    }
+    private func applyBackdrop(_ target: BackdropTarget) {
+        switch target {
+        case .pending: return
+        case .empty: backdropTop = nil
+        case .layer(let layer):
+            guard layer != backdropTop else { return }
+            // Only the floating icon uses a SwiftUI fade; the image itself cross-dissolves in UIKit.
+            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.22)) { backdropTop = layer }
+        }
+    }
     private func backdrop(size: CGSize) -> some View {
         ZStack {
             Color(red: 0.025, green: 0.035, blue: 0.065)
-            if let app = selected {
-                if let image = artwork.image(for: liveBoardAppKey(app), kind: .background, mode: mode) {
-                    Image(uiImage: image).resizable().scaledToFill().frame(width: size.width, height: size.height).clipped()
-                } else {
-                    if let image = LiveBoardIconStore.background(app, dark: darkIcons) {
-                        Image(uiImage: image).resizable().scaledToFill()
-                            .frame(width: size.width, height: size.height).clipped()
-                    }
-                }
-            }
+            // One persistent UIImageView: UIKit cross-dissolves from whatever is on screen (even mid-fade)
+            // straight to the new image, so there is never a frame without a background.
+            LiveBoardCrossfadeImage(image: backdropTop?.image, id: backdropTop?.id ?? "", animated: !reduceMotion)
+                .frame(width: size.width, height: size.height)
             LinearGradient(colors: [.black.opacity(0.25), .black.opacity(0.15), .black.opacity(0.85)], startPoint: .top, endPoint: .bottom)
             LinearGradient(colors: [.black.opacity(0.68), .clear], startPoint: .leading, endPoint: .trailing)
-        }.id(selected.map(liveBoardAppKey)).transition(.opacity).frame(width: size.width, height: size.height).clipped()
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: selected.map(liveBoardAppKey))
+        }.frame(width: size.width, height: size.height).clipped()
+            .onAppear { applyBackdrop(backdropTarget) }
+            .onChange(of: backdropTarget.id) { _ in applyBackdrop(backdropTarget) }
+    }
+    private func prefetchArtwork(around index: Int) {
+        let apps = visibleApps
+        guard !apps.isEmpty else { return }
+        func keys(_ radius: Int) -> [String] {
+            (max(0, index - radius)...min(apps.count - 1, index + radius)).map { liveBoardAppKey(apps[$0]) }
+        }
+        artwork.prefetch(keys(3), kinds: bigPicture ? [.cover, .portrait] : [.cover], mode: mode)
+        artwork.prefetch(keys(1), kinds: [.background], mode: mode)
     }
     private func header(landscape: Bool) -> some View {
         HStack(spacing: landscape ? 18 : 8) {
@@ -234,7 +282,7 @@ struct LiveBoardConsoleScreen: View {
         HStack(spacing: 12) {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 18) {
-                    ForEach(library.categories, id: \.self) { name in
+                    ForEach(library.visibleCategories(apps), id: \.self) { name in
                         Button { activeCategory = activeCategory == name ? nil : name; favoritesOnly = false; navigation.selectedIndex = 0 } label: {
                             Text(name).font(.system(size: 13, weight: activeCategory == name ? .bold : .regular)).foregroundStyle(.white.opacity(activeCategory == name ? 1 : 0.55)).padding(.vertical, 6)
                         }.accessibilityIdentifier("console.category." + name)
@@ -266,13 +314,14 @@ struct LiveBoardConsoleScreen: View {
                         }
                     }
                 }
+                Section { Toggle("Same categories in every interface", isOn: Binding(get: { universalCategories }, set: { LiveBoardSharedCategories.setEnabled($0); universalCategories = $0 })) } footer: { Text("Hidden apps stay separate for each interface.") }
                 Section { Toggle("Navigation sounds", isOn: $sounds) }
             }.navigationTitle("Categories & visibility")
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { managingCategories = false } } }
         }.navigationViewStyle(.stack)
     }
     private func changeSection(_ delta: Int) {
-        let sections = ["Library", "Favorites"] + library.categories
+        let sections = ["Library", "Favorites"] + library.visibleCategories(apps)
         let current = activeCategory.flatMap { sections.firstIndex(of: $0) } ?? (favoritesOnly ? 1 : 0)
         let index = (current + delta + sections.count) % sections.count
         favoritesOnly = index == 1; activeCategory = index >= 2 ? sections[index] : nil; navigation.selectedIndex = 0
@@ -290,12 +339,16 @@ struct LiveBoardConsoleScreen: View {
                         }
                         .buttonStyle(.plain)
                         .id(liveBoardAppKey(app))
+                        .strataReorderable(liveBoardAppKey(app), all: apps)
                         .contextMenu {
-                            Button("Request Game Mode", systemImage: "gamecontroller.fill") { navigation.selectedIndex = index; activate(app, gameMode: true) }
+                            if !(app.appInfo is StrataPhoneAppInfo) { Button("Request Game Mode", systemImage: "gamecontroller.fill") { navigation.selectedIndex = index; activate(app, gameMode: true) } }
+                            if !(app.appInfo is StrataPhoneAppInfo) {
                             Button("Launch with JIT", systemImage: "bolt.fill") { navigation.selectedIndex = index; activate(app, forceJIT: true) }
                             if let launchMultitask { Button("Multitask", systemImage: "rectangle.on.rectangle") { Task { await launchMultitask(app) } } }
                             if let launchWithMetalHUD { Button("Launch with Metal HUD", systemImage: "gauge.with.dots.needle.67percent") { Task { await launchWithMetalHUD(app) } } }
+                            }
                             Button(app.strataSwitcherPinned ? "Unpin from app switcher" : "Pin to app switcher", systemImage: "pin") { app.strataSwitcherPinned.toggle() }
+                            StrataArrangeMenus(app: app, visible: visibleApps, all: apps, categories: library.categories, current: library.assignments[liveBoardAppKey(app)]) { value in updateLibrary { $0.assignments[liveBoardAppKey(app)] = value } }
                             Button("App options", systemImage: "ellipsis") { navigation.selectedIndex = index; showDetails() }
                         }
                         .accessibilityLabel(appCustomization.name(app))
@@ -308,6 +361,7 @@ struct LiveBoardConsoleScreen: View {
             .frame(height: (bigPicture ? (landscape ? 126 : 196) : (landscape ? 116 : 142)) * scale)
             .task(id: selected.map(liveBoardAppKey)) {
                 guard let app = selected else { return }
+                prefetchArtwork(around: min(navigation.selectedIndex, visibleApps.count - 1))
                 // Let the newly selected cover's width settle before calculating its scroll position.
                 try? await Task.sleep(nanoseconds: 20_000_000)
                 guard !Task.isCancelled else { return }
@@ -320,19 +374,25 @@ struct LiveBoardConsoleScreen: View {
     private func cover(_ app: LCAppModel, selected: Bool, landscape: Bool, scale: CGFloat) -> some View {
         let h: CGFloat = (bigPicture ? (landscape ? 112 : 180) : (selected ? (landscape ? 106 : 128) : (landscape ? 78 : 88))) * scale
         let w: CGFloat = bigPicture ? (selected ? h * 1.7 : h * 0.68) : h
+        let key = liveBoardAppKey(app)
+        let primary: LiveBoardArtworkStore.Kind = bigPicture && !selected ? .portrait : .cover
+        let secondary: LiveBoardArtworkStore.Kind = primary == .cover ? .portrait : .cover
+        // While the newly needed kind decodes, show the other already-cached kind instead of a dark tile.
+        let image = artwork.image(for: key, kind: primary, mode: mode) ?? (bigPicture ? artwork.cachedImage(for: key, kind: secondary, mode: mode) : nil)
+        let shape = RoundedRectangle(cornerRadius: bigPicture ? 5 : 18, style: .continuous)
         return ZStack {
             Color(white: 0.08)
-            if let image = artwork.image(for: liveBoardAppKey(app), kind: bigPicture && !selected ? .portrait : .cover, mode: mode) {
+            if let image {
                 Image(uiImage: image).resizable().scaledToFill().frame(width: w, height: h).clipped()
             } else {
                 LiveBoardIconImage(app: app, dark: darkIcons).frame(width: bigPicture ? h * 0.65 : h, height: bigPicture ? h * 0.65 : h)
             }
         }
         .frame(width: w, height: h)
-        .clipShape(RoundedRectangle(cornerRadius: bigPicture ? 5 : 18, style: .continuous))
+        .clipShape(shape)
+        // Border lives inside the animated geometry so it grows with the cover.
+        .overlay(shape.strokeBorder(.white.opacity(selected ? 0.9 : 0), lineWidth: 2))
         .animation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.86), value: selected)
-        .overlay(RoundedRectangle(cornerRadius: bigPicture ? 5 : 18, style: .continuous).strokeBorder(.white.opacity(selected ? 0.9 : 0), lineWidth: selected ? 2 : 0))
-
     }
     @ViewBuilder private func hero(landscape: Bool) -> some View {
         if let app = selected {
@@ -431,7 +491,7 @@ struct LiveBoardConsoleScreen: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         VStack(spacing: 4) {
-                            ForEach((0..<11).filter { bigPicture || $0 != 6 }, id: \.self) { index in
+                            ForEach((0..<11).filter { (bigPicture || $0 != 6) && (!(app.appInfo is StrataPhoneAppInfo) || ($0 != 8 && $0 != 10)) }, id: \.self) { index in
                                 Button { detailAction(index, app: app) } label: {
                                     HStack(spacing: 10) {
                                         Image(systemName: ["play.fill", "gearshape", "photo", "rectangle", "star", "arrow.counterclockwise", "rectangle.portrait", "eye.slash", "bolt.fill", "pencil", "gamecontroller.fill"][index]).frame(width: 24)
@@ -547,5 +607,44 @@ struct LiveBoardConsoleScreen: View {
         case .nextSection: changeSection(1)
         default: navigation.move(command, count: visibleApps.count)
         }
+    }
+}
+
+/// Full-bleed image that changes with a UIKit cross-dissolve. Sized by SwiftUI, never by the image.
+struct LiveBoardCrossfadeImage: UIViewRepresentable {
+    let image: UIImage?
+    let id: String
+    let animated: Bool
+    final class Container: UIView {
+        let imageView = UIImageView()
+        var currentID: String?
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+            clipsToBounds = true
+            imageView.contentMode = .scaleAspectFill
+            imageView.clipsToBounds = true
+            imageView.frame = bounds
+            imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            addSubview(imageView)
+            isUserInteractionEnabled = false
+        }
+        required init?(coder: NSCoder) { fatalError() }
+    }
+    func makeUIView(context: Context) -> Container {
+        let view = Container()
+        view.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        view.setContentHuggingPriority(.defaultLow, for: .vertical)
+        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        view.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+        view.imageView.image = image; view.currentID = id
+        return view
+    }
+    func updateUIView(_ view: Container, context: Context) {
+        guard view.currentID != id else { return }
+        view.currentID = id
+        let next = image
+        if animated, view.window != nil, view.imageView.image != nil, next != nil {
+            UIView.transition(with: view.imageView, duration: 0.22, options: [.transitionCrossDissolve, .allowUserInteraction, .beginFromCurrentState]) { view.imageView.image = next }
+        } else { view.imageView.image = next }
     }
 }

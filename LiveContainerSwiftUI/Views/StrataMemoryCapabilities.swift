@@ -87,7 +87,7 @@ import StosSign_Anisette
         guard value.count == 6, value.allSatisfy(\.isNumber), let callback = verification else { return }
         verification = nil; needsCode = false; callback(value); code = ""
     }
-    func apply() {
+    func apply(bypass: Bool = false) {
         guard !busy, let session, let team, let selected = registeredTargets else { return }
         let requested = registrations.filter { selected.contains($0.identifier) }
         guard requested.count == selected.count else { return }
@@ -97,7 +97,7 @@ import StosSign_Anisette
             defer { if generation == operation { busy = false; task = nil } }
             var completed = 0
             do {
-                let capabilities = StrataMemoryRequestPolicy.capabilities
+                let capabilities = bypass ? StrataMemoryRequestPolicy.bypassCapabilities : StrataMemoryRequestPolicy.capabilities
                 for appID in requested {
                     try Task.checkCancellation()
                     _ = try await AppleAPI.shared.updateAppID(appID, capabilities: capabilities, team: team, session: session)
@@ -105,7 +105,11 @@ import StosSign_Anisette
                 }
                 if generation == operation { status = "Apple accepted the capability requests. Reimport and install the current Strata IPA through SideStore, keeping all extensions. A refresh alone may not retain the entitlement. Then check Installed memory permissions; this message does not confirm extra memory is active." }
             } catch {
-                if generation == operation { status = "Completed \(completed) of \(requested.count) requests. " + error.localizedDescription }
+                if generation == operation {
+                    status = bypass
+                        ? "Apple refused the RAM bypass. The Increased Debugging Memory Limit is only available to paid Apple Developer Program accounts; free Apple IDs stay at the regular extra-memory limit. Your existing memory permission is unchanged. (\(error.localizedDescription))"
+                        : "Completed \(completed) of \(requested.count) requests. " + error.localizedDescription
+                }
             }
         }
     }
@@ -134,6 +138,8 @@ struct StrataMemorySettings: View {
             Section("Installed memory permissions") {
                 Label(snapshot["hostMemory"] as? Bool == true ? "Strata: extra memory allowed" : "Strata: standard memory permission", systemImage: "memorychip")
                 Label(snapshot["guestMemory"] as? Bool == true ? "Guest process: extra memory requested in signature" : "Guest process: standard memory signature", systemImage: "app.connected.to.app.below.fill")
+                Label(snapshot["hostDebugMemory"] as? Bool == true ? "Strata: RAM bypass (debugging limit) in signature" : "Strata: RAM bypass not in signature", systemImage: "bolt.horizontal.circle")
+                Label(snapshot["guestDebugMemory"] as? Bool == true ? "Guest process: RAM bypass in signature" : "Guest process: RAM bypass not in signature", systemImage: "bolt.horizontal.circle")
                 Text("Available to Strata now: \(snapshot["availableMB"] as? UInt64 ?? (snapshot["availableMB"] as? NSNumber)?.uint64Value ?? 0) MB")
                 Button("Refresh status") { snapshot = LCUtils.strataMemoryStatus() as? [String: Any] ?? [:] }
             }
@@ -186,6 +192,8 @@ struct StrataMemorySettings: View {
                     }
                     Text("Select only the Strata and LiveProcess IDs belonging to your SideStore installation. If SideStore uses one shared registration for both, select it in both fields. No IDs are created or changed until you tap Apply.").font(.footnote).foregroundStyle(.secondary)
                     Button("Apply extra memory to selected registrations") { capability.apply() }.disabled(!capability.canApply)
+                    Button("Apply RAM bypass (experimental)") { capability.apply(bypass: true) }.disabled(!capability.canApply)
+                    Text("RAM bypass adds Apple's Increased Debugging Memory Limit. It only raises the limit while a debugger is attached, so use it with Launch with JIT; ordinary launches stay at the regular extra-memory limit. Apple may refuse it for some accounts. iOS still decides the final amount.").font(.footnote).foregroundStyle(.secondary)
                     Button("Sign out") { capability.signOut() }
                 }
                 if capability.busy { ProgressView("Working…"); Button("Cancel") { capability.cancel() } }

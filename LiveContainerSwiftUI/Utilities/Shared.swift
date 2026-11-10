@@ -53,6 +53,7 @@ struct LCPath {
 }
 
 class SharedModel: ObservableObject {
+    @Published var registryLoading = true
     @Published var selectedTab: LCTabIdentifier = .apps
     @Published var deepLink: URL?
     

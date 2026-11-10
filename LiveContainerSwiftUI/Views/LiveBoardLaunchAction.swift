@@ -20,7 +20,8 @@ extension LCAppModel {
         if appInfo.isLocked && !DataManager.shared.model.isHiddenAppUnlocked {
             guard try await LCUtils.authenticateUser() else { return }
         }
-        if gameMode {
+        // Declare Game Mode support once per app; re-sign only when the metadata actually changed.
+        if gameMode && !appInfo.gameModeSupportDeclared() {
             try appInfo.enableGameModeSupport()
             try await signApp(force: true)
         }

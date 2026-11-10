@@ -12,3 +12,9 @@
 No claim of endorsement or ownership of upstream trademarks is made. See each component's source for its complete dependency notices.
 
 StosSign (https://github.com/stossy11/StosSign), f8075577623707bd7899a884f31f2c4674af18d4, supplies Apple authentication/capability APIs. Vendor/StosSign/UPSTREAM.txt describes local privacy/cancellation patches. The Strata maintainer confirmed on 2026-10-29 that developer permission for redistribution had been obtained. Upstream has no standalone license file at this commit; no general upstream license or blanket reuse grant is asserted here. Original authorship notices are retained. Dependency licenses are collected under Vendor/DependencyNotices and versions in Xcode Package.resolved. GetMoreRam was inspected as a reference; its app code was not copied.
+
+
+## MetalFG (experimental guest frame generation)
+
+Upstream: https://github.com/dnullptr/MetalFG
+Pinned revision: c6e5f49cb4eb1a466eca1c66e3bf200ebbdab9e9. MIT license, retained at Vendor/MetalFG/LICENSE. Strata adapts the warper and touch tracker; it does not load upstream jailbreak injection, synchronizer or UI. Port changes are documented in Vendor/MetalFG/UPSTREAM.txt and FrameGeneration/.

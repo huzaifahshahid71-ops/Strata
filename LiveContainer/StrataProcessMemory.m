@@ -3,6 +3,7 @@
 #import <mach/mach.h>
 #import <Security/Security.h>
 #import <unistd.h>
+#import <sys/sysctl.h>
 #import <TargetConditionals.h>
 
 #if !TARGET_OS_OSX
@@ -37,9 +38,11 @@ void StrataStartProcessMemoryDiagnostics(NSString *group, NSString *guestName, N
 #else
             uint64_t available = os_proc_available_memory();
 #endif
+            struct kinfo_proc process = {0}; size_t processSize = sizeof(process); int mib[] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, pid};
+            BOOL attached = sysctl(mib, 4, &process, &processSize, NULL, 0) == 0 && (process.kp_proc.p_flag & P_TRACED);
             NSMutableDictionary *record = [@{@"schema":@1, @"pid":@(pid), @"guest":name, @"executionMode":executionMode ?: @"unknown",
                 @"startedAt":@(startedAt), @"sampledAt":@(NSDate.date.timeIntervalSince1970),
-                @"increasedMemoryEntitlement":@(increased), @"availableBytes":@(available),
+                @"increasedMemoryEntitlement":@(increased), @"debuggerAttached":@(attached), @"availableBytes":@(available),
                 @"availableReported":@(available > 0), @"footprintReported":@(hasFootprint)} mutableCopy];
             if (hasFootprint) record[@"footprintBytes"] = @(vm.phys_footprint);
             NSData *json = [NSJSONSerialization dataWithJSONObject:record options:NSJSONWritingPrettyPrinted error:nil];

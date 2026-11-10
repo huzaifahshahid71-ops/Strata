@@ -1,0 +1,4 @@
+MetalFG — https://github.com/dnullptr/MetalFG
+Pinned revision c6e5f49cb4eb1a466eca1c66e3bf200ebbdab9e9
+License: MIT, retained in LICENSE.
+Strata port uses the warper and touch tracker. Upstream Logos injection, fixed120Hz synchronizer and overlay are not loaded. Port modifications add configurable presentation duration, offscreen benchmark output and GPU-completion callbacks, and remove jailbreak resource paths. See FrameGeneration/.

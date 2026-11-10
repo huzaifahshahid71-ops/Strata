@@ -5,6 +5,7 @@
 @import Security;
 #import <IOKit/IOKitLib.h>
 #import <os/proc.h>
+#import <mach/mach.h>
 
 #import "LCUtils.h"
 #import "../../LiveContainer/StrataGuestControls.h"
@@ -22,7 +23,28 @@
 }
 @end
 
+@protocol StrataRefreshBridgeAPI
++ (void)refreshWithCompletion:(void (^)(NSString *error))completion;
++ (void)cancel;
+@end
+
 @implementation LCUtils
++ (void)strataRefreshSideStore:(void (^)(NSString *error))completion {
+    Class bridge = NSClassFromString(@"StrataSideStoreRefreshBridge");
+    if (!bridge) {
+        dlopen("@executable_path/Frameworks/SideStoreSupport.framework/SideStoreSupport", RTLD_LAZY);
+        bridge = NSClassFromString(@"StrataSideStoreRefreshBridge");
+    }
+    if (![bridge respondsToSelector:@selector(refreshWithCompletion:)]) {
+        completion(@"This installation does not include the Strata SideStore refresh bridge. Install the combined update and keep all extensions."); return;
+    }
+    [(id<StrataRefreshBridgeAPI>)bridge refreshWithCompletion:completion];
+}
++ (void)strataCancelSideStoreRefresh {
+    Class bridge = NSClassFromString(@"StrataSideStoreRefreshBridge");
+    if ([bridge respondsToSelector:@selector(cancel)]) [(id<StrataRefreshBridgeAPI>)bridge cancel];
+}
+
 + (void)strataToggleAppSwitcher {
     UIWindow *window = nil;
     for (UIWindowScene *scene in UIApplication.sharedApplication.connectedScenes) {
@@ -51,7 +73,8 @@
     };
     NSString *memoryKey = @"com.apple.developer.kernel.increased-memory-limit";
     NSString *addressKey = @"com.apple.developer.kernel.extended-virtual-addressing";
-    BOOL hostMemory = flag(memoryKey), hostAddress = flag(addressKey);
+    NSString *debugKey = @"com.apple.developer.kernel.increased-debugging-memory-limit";
+    BOOL hostMemory = flag(memoryKey), hostAddress = flag(addressKey), hostDebug = flag(debugKey);
     CFTypeRef signedIDValue = task ? SecTaskCopyValueForEntitlement(task, CFSTR("application-identifier"), NULL) : NULL;
     NSString *hostSignedID = signedIDValue && CFGetTypeID(signedIDValue) == CFStringGetTypeID() ? [(__bridge NSString *)signedIDValue copy] : @"";
     if (signedIDValue) CFRelease(signedIDValue);
@@ -63,7 +86,11 @@
     NSData *sampleData = root ? [NSData dataWithContentsOfURL:[root URLByAppendingPathComponent:@"Library/StrataDiagnostics/guest-memory.json"]] : nil;
     NSDictionary *sample = sampleData ? [NSJSONSerialization JSONObjectWithData:sampleData options:0 error:nil] : nil;
     if (![sample isKindOfClass:NSDictionary.class] || ![sample[@"schema"] isEqual:@1]) sample = @{};
-    return @{@"guestSample":sample, @"hostMemory":@(hostMemory), @"hostAddress":@(hostAddress),
+    task_vm_info_data_t vm = {0};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    BOOL footprintReported = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vm, &count) == KERN_SUCCESS;
+    return @{@"footprintReported":@(footprintReported), @"usedMB":@(footprintReported ? vm.phys_footprint / (1024 * 1024) : 0), @"guestSample":sample, @"hostMemory":@(hostMemory), @"hostAddress":@(hostAddress),
+        @"hostDebugMemory":@(hostDebug), @"guestDebugMemory":@([entitlements[debugKey] boolValue]),
         @"guestMemory":@([entitlements[memoryKey] boolValue]), @"guestAddress":@([entitlements[addressKey] boolValue]),
         @"hostSignedID":hostSignedID, @"guestSignedID":[entitlements[@"application-identifier"] isKindOfClass:NSString.class] ? entitlements[@"application-identifier"] : @"",
         @"guestID":guest.bundleIdentifier ?: @"", @"teamID":[LCSharedUtils teamIdentifier] ?: @"",
@@ -81,7 +108,58 @@
 
 #pragma mark Certificate & password
 
+// Read only the X.509 validity sequence from the imported certificate's DER.
++ (NSDictionary *)strataCertificateMetadata:(NSData *)data password:(NSString *)password {
+    NSString *team = [self getCertTeamIdWithKeyData:data password:password];
+    if (!team.length) return nil;
+    CFArrayRef imported = NULL;
+    OSStatus status = SecPKCS12Import((__bridge CFDataRef)data, (__bridge CFDictionaryRef)@{(__bridge id)kSecImportExportPassphrase:password}, &imported);
+    NSArray *items = CFBridgingRelease(imported);
+    if (status != errSecSuccess || !items.count) return @{@"teamID":team};
+    SecIdentityRef identity = (__bridge SecIdentityRef)items.firstObject[(__bridge id)kSecImportItemIdentity];
+    SecCertificateRef certificate = NULL;
+    if (!identity || SecIdentityCopyCertificate(identity, &certificate) != errSecSuccess) return nil;
+    __block NSData *der = CFBridgingRelease(SecCertificateCopyData(certificate)); CFRelease(certificate);
+    // DER reader returns [tag, contents], refusing indefinite/overflowing lengths.
+    __block NSUInteger cursor = 0;
+    NSArray *(^read)(void) = ^NSArray *{
+        if (cursor + 2 > der.length) return nil;
+        const uint8_t *bytes = der.bytes; uint8_t tag = bytes[cursor++]; NSUInteger length = bytes[cursor++];
+        if (length & 0x80) {
+            NSUInteger count = length & 0x7f; length = 0;
+            if (!count || count > 4 || count > der.length - cursor) return nil;
+            while (count--) length = (length << 8) | bytes[cursor++];
+        }
+        if (length > der.length - cursor) return nil;
+        NSData *content = [der subdataWithRange:NSMakeRange(cursor, length)]; cursor += length;
+        return @[@(tag), content];
+    };
+    NSArray *outer = read(); if ([outer[0] intValue] != 0x30) return nil;
+    der = outer[1]; cursor = 0;
+    NSArray *tbs = read(); if ([tbs[0] intValue] != 0x30) return nil;
+    der = tbs[1]; cursor = 0;
+    NSArray *serial = read(); if ([serial[0] intValue] == 0xa0) serial = read();
+    if ([serial[0] intValue] != 2) return nil;
+    if (!read() || !read()) return nil; // signature algorithm, issuer
+    NSArray *validity = read(); if ([validity[0] intValue] != 0x30) return nil;
+    der = validity[1]; cursor = 0;
+    NSDate *(^date)(NSArray *) = ^NSDate *(NSArray *item) {
+        if (!item || (![item[0] isEqual:@23] && ![item[0] isEqual:@24])) return nil;
+        NSString *text = [[NSString alloc] initWithData:item[1] encoding:NSASCIIStringEncoding];
+        if (![text hasSuffix:@"Z"]) return nil;
+        NSDateFormatter *format = [NSDateFormatter new]; format.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"]; format.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
+        format.dateFormat = [item[0] intValue] == 23 ? @"yyMMddHHmmss'Z'" : @"yyyyMMddHHmmss'Z'";
+        format.twoDigitStartDate = [NSDate dateWithTimeIntervalSince1970:-631152000];
+        return [format dateFromString:text];
+    };
+    NSDate *starts = date(read()), *expires = date(read());
+    if (!starts || !expires) return nil;
+    return @{@"teamID":team,@"expires":expires,@"starts":starts};
+}
+
 + (NSData *)certificateData {
+    NSDictionary *identity = [LCSharedUtils strataSigningIdentity];
+    if (identity) return identity[@"p12"];
     NSUserDefaults* nud = [[NSUserDefaults alloc] initWithSuiteName:[LCSharedUtils appGroupID]];
     if(!nud) {
         nud = NSUserDefaults.standardUserDefaults;
@@ -257,7 +335,10 @@
 
     NSLog(@"[LC] starting signing...");
     
-    NSProgress* ans = [NSClassFromString(@"ZSigner") signWithAppPath:[path path] bundleId:NSBundle.mainBundle.bundleIdentifier cert:self.certificateData pass:LCSharedUtils.certificatePassword completionHandler:completionHandler];
+    NSDictionary *identity = [LCSharedUtils strataSigningIdentity];
+    NSData *data = identity ? identity[@"p12"] : self.certificateData;
+    NSString *password = identity ? identity[@"password"] : LCSharedUtils.certificatePassword;
+    NSProgress* ans = [NSClassFromString(@"ZSigner") signWithAppPath:[path path] bundleId:NSBundle.mainBundle.bundleIdentifier cert:data pass:password completionHandler:completionHandler];
     
     return ans;
 }
@@ -274,8 +355,11 @@
         [paths addObject:url.path];
     }
     
-    return [NSClassFromString(@"ZSigner") signMachOPathArr:paths bundleId:NSBundle.mainBundle.bundleIdentifier cert:self.certificateData
-                                                      pass:LCSharedUtils.certificatePassword completionHandler:completionHandler];
+    NSDictionary *identity = [LCSharedUtils strataSigningIdentity];
+    NSData *data = identity ? identity[@"p12"] : self.certificateData;
+    NSString *password = identity ? identity[@"password"] : LCSharedUtils.certificatePassword;
+    return [NSClassFromString(@"ZSigner") signMachOPathArr:paths bundleId:NSBundle.mainBundle.bundleIdentifier cert:data
+                                                      pass:password completionHandler:completionHandler];
 }
 
 + (NSString*)getCertTeamIdWithKeyData:(NSData*)keyData password:(NSString*)password {
@@ -290,12 +374,14 @@
 
 + (int)validateCertificateWithCompletionHandler:(void(^)(int status, NSDate *expirationDate, NSString *organizationalUnitName, NSString *error))completionHandler {
     NSError *error;
-    NSData *certData = [LCUtils certificateData];
+    NSDictionary *identity = [LCSharedUtils strataSigningIdentity];
+    NSData *certData = identity ? identity[@"p12"] : [LCUtils certificateData];
+    NSString *password = identity ? identity[@"password"] : [LCSharedUtils certificatePassword];
     if (error) {
         return -6;
     }
     [self loadStoreFrameworksWithError2:&error];
-    int ans = [NSClassFromString(@"ZSigner") checkCert:certData pass:[LCSharedUtils certificatePassword] completionHandler:completionHandler];
+    int ans = [NSClassFromString(@"ZSigner") checkCert:certData pass:password completionHandler:completionHandler];
     return ans;
 }
 

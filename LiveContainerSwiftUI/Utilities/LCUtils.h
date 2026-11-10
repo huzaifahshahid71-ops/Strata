@@ -25,6 +25,11 @@ uint32_t dyld_get_sdk_version(const struct mach_header* mh);
 @end
 
 @interface LCUtils : NSObject
++ (NSDictionary *)strataPhoneApplications;
++ (void)strataOpenPhoneApplication:(NSString *)identifier completion:(void (^)(NSString * _Nullable error))completion;
++ (UIImage * _Nullable)strataPhoneApplicationIcon:(NSString *)identifier;
++ (void)strataRefreshSideStore:(void (^)(NSString *error))completion;
++ (void)strataCancelSideStoreRefresh;
 + (BOOL)strataCanDebug;
 + (NSDictionary *)strataMemoryStatus;
 + (void)strataToggleAppSwitcher;
@@ -34,6 +39,7 @@ uint32_t dyld_get_sdk_version(const struct mach_header* mh);
 + (void)validateJITLessSetupWithCompletionHandler:(void (^)(BOOL success, NSError *error))completionHandler;
 + (NSURL *)archiveIPAWithBundleName:(NSString*)newBundleName includingExtraInfoDict:(NSDictionary *)extraInfoDict error:(NSError **)error;
 + (NSData *)certificateData;
++ (NSDictionary *)strataCertificateMetadata:(NSData *)data password:(NSString *)password;
 + (void)launchMultitaskGuestApp:(NSString *)displayName fullScreen:(BOOL)fullScreen completionHandler:(void (^)(NSNumber *pid, NSError *error))completionHandler API_AVAILABLE(ios(16.0));
 + (void)launchMultitaskGuestApp:(NSString *)displayName fullScreen:(BOOL)fullScreen waitForJIT:(BOOL)waitForJIT completionHandler:(void (^)(NSNumber *pid, NSError *error))completionHandler API_AVAILABLE(ios(16.0));
 + (void)strataShowJITFailure:(NSString *)message forPID:(int)pid API_AVAILABLE(ios(17.4));

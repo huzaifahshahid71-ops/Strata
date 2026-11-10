@@ -1,13 +1,16 @@
 import SwiftUI
 
 private enum LiveBoardMode: String, CaseIterable, Identifiable {
-    case ios, cinematic, bigPicture
+    case ios, cinematic, bigPicture, switchboard, shelf, arcade
     var id: String { rawValue }
     var title: String {
         switch self {
         case .ios: return "iOS Home"
         case .cinematic: return "Cinematic"
         case .bigPicture: return "Big Picture"
+        case .switchboard: return "Switchboard"
+        case .shelf: return "Shelf"
+        case .arcade: return "Arcade"
         }
     }
     var symbol: String {
@@ -15,6 +18,9 @@ private enum LiveBoardMode: String, CaseIterable, Identifiable {
         case .ios: return "square.grid.3x3.fill"
         case .cinematic: return "rectangle.stack.fill"
         case .bigPicture: return "gamecontroller.fill"
+        case .switchboard: return "rectangle.split.3x1.fill"
+        case .shelf: return "square.grid.3x2.fill"
+        case .arcade: return "app.badge.fill"
         }
     }
     var detail: String {
@@ -22,6 +28,9 @@ private enum LiveBoardMode: String, CaseIterable, Identifiable {
         case .ios: return "A familiar, compact app grid."
         case .cinematic: return "A cinematic carousel with controller navigation."
         case .bigPicture: return "A cover library with controller navigation."
+        case .switchboard: return "A clean horizontal game row with controller navigation."
+        case .shelf: return "A full-screen poster grid tinted by the selected game."
+        case .arcade: return "A full-screen grid of rounded app tiles tinted by the selected game."
         }
     }
 }
@@ -31,10 +40,13 @@ struct LiveBoardRootView: View {
     @EnvironmentObject private var sharedModel: SharedModel
     @AppStorage("LiveBoardMode", store: LCUtils.appGroupUserDefault) private var mode = "ios"
     @State private var interfacePresented = false
+    @AppStorage("StrataResumeAfterSystemClose", store: LCUtils.appGroupUserDefault) private var resumeAfterSystemClose = true
+    @AppStorage("StrataKeepGuestAlive", store: LCUtils.appGroupUserDefault) private var keepGuestAlive = false
     @State private var destinationPresented = false
 
     var body: some View {
         LCAppListView(openInterface: { interfacePresented = true })
+        .onAppear { if mode == "dashboard" || mode == "spotlight" { mode = "cinematic" } } // removed in r40
         .preferredColorScheme(.dark)
         .sheet(isPresented: $interfacePresented, onDismiss: { NotificationCenter.default.post(name: LiveBoardControllerInput.resumeNotification, object: nil) }) {
             NavigationView {
@@ -57,6 +69,12 @@ struct LiveBoardRootView: View {
                             }.buttonStyle(.plain)
                                 .accessibilityAddTraits(mode == option.rawValue ? .isSelected : [])
                         }
+                        Toggle("Reopen the running app if iOS closes Strata in the background", isOn: $resumeAfterSystemClose).padding(.horizontal, 20).padding(.vertical, 8)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Toggle("Keep the running app alive in the background", isOn: $keepGuestAlive)
+                            Text("Lets you switch to another app and come back without losing progress. Uses more battery; iOS may still close very large games when memory runs out.").font(.caption).foregroundStyle(.secondary)
+                        }.padding(.horizontal, 20).padding(.vertical, 8)
+                        NavigationLink { StrataPhoneAppsView() } label: { Label("iPhone Apps", systemImage: "iphone.and.arrow.forward").padding() }
                         StrataCreditsButton(location: "interface.about").padding(18).liveBoardGlass(radius: 20)
                     }.padding()
                 }

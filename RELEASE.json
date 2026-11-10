@@ -1,9 +1,10 @@
 {
-  "version": "2.0",
-  "tag": "v2.0.0",
-  "developmentRevision": 25,
+  "version": "3.0",
+  "tag": "v3.0.0",
+  "developmentRevision": 41,
   "liveContainerBase": "3.8.11",
   "sourceBase": "bdc07ed9d0fce19f79db78a4a1015d67d4312597",
-  "ipaSha256": "981ab6c5e13a585d7712709340a45cd9254ca0c8230b29bd112628743cff739e",
+  "previousRelease": "v2.0.0",
+  "ipaSha256": "ce762ae8ea4419546ace0f160cc4aec9b1c544cf4becb130f6ae60510cd44c0c",
   "bundleVersionRetainedForCompatibility": true
 }

@@ -86,7 +86,7 @@ struct LiveBoardAppAppearance: View {
                     LiveBoardIconImage(app: app, dark: false).frame(width: 72, height: 72).clipShape(RoundedRectangle(cornerRadius: 16))
                     Button("Choose image from Photos") { choosingIcon = true }.accessibilityIdentifier("appearance.chooseIcon")
                     Button("Restore original icon") { customization.resetIcon(app) }
-                    Text("Names and icons appear in all three interfaces. Console cover artwork stays separate.").font(.footnote).foregroundStyle(.secondary)
+                    Text("Names and icons appear in all interfaces. Console cover artwork stays separate.").font(.footnote).foregroundStyle(.secondary)
                 }
                 if let error { Section { Text(error).foregroundStyle(.red) } }
             }.navigationTitle("App appearance")

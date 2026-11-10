@@ -6,6 +6,7 @@ import CoreImage
     private static let icons = NSCache<NSString, UIImage>()
     private static let backgrounds = NSCache<NSString, UIImage>()
     private static let context = CIContext(options: [.cacheIntermediates: false])
+    static func invalidate() { icons.removeAllObjects(); backgrounds.removeAllObjects() }
     static func image(_ app: LCAppModel, dark: Bool) -> UIImage? {
         if let custom = LiveBoardAppCustomization.shared.image(app) { return custom }
         if app.bundleIdentifier.caseInsensitiveCompare("com.EduAlexxis.MusicManager") == .orderedSame,
@@ -14,6 +15,7 @@ import CoreImage
         }
         let key = (app.appInfo.bundlePath() + (dark ? ":dark" : ":light") + ":" + String(LiveBoardAppCustomization.shared.revision)) as NSString
         if let image = icons.object(forKey: key) { return image }
+        if let phone = app.appInfo as? StrataPhoneAppInfo, let image = phone.iconIsDarkIcon(dark) { icons.setObject(image, forKey: key); return image }
         guard let image = UIImage.generateIcon(forBundleURL: URL(fileURLWithPath: app.appInfo.bundlePath()), style: dark ? .Dark : .Light, hasBorder: false) else { return nil }
         let cleaned = LiveBoardIconEdges.clean(image)
         icons.setObject(cleaned, forKey: key)

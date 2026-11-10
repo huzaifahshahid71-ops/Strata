@@ -212,6 +212,10 @@ class LCAppModel: ObservableObject, Hashable {
     
     // You should let LCAppModel.runApp to decide whether to run in multitask mode, but you may override the multitask parameter if necessary
     func runApp(multitask: Bool? = nil, containerFolderName : String? = nil, bundleIdOverride : String? = nil, urlStr : String? = nil, forceJIT: Bool? = nil) async throws{
+        if let shortcut = appInfo as? StrataPhoneAppInfo {
+            try await StrataPhoneApps.shared.open(shortcut.entryID)
+            return
+        }
         let acquired = await MainActor.run { () -> Bool in
             guard !self.isAppRunning else { return false }
             self.isAppRunning = true
@@ -242,12 +246,15 @@ class LCAppModel: ObservableObject, Hashable {
         
         let classicMode = appInfo.defaultClassicMode
         let builtInJIT = LCUtils.appGroupUserDefault.integer(forKey: "LCJITEnablerType") == JITEnablerType.BuiltIn.rawValue && (forceJIT ?? (appInfo.isJITNeeded || appInfo.is32bit))
+        let hostOptions = (LCUtils.appGroupUserDefault.string(forKey: "StrataHostJITApps") ?? "{}").data(using: .utf8).flatMap { try? JSONDecoder().decode([String: Bool].self, from: $0) } ?? [:]
+        let hostKey = "\(uiIsShared ? "shared" : "local"):\(appInfo.relativeBundlePath ?? bundleIdentifier)"
+        let hostJIT = builtInJIT && hostOptions[hostKey] == true && multitask != true && classicMode == 0
         if builtInJIT && classicMode != 0 {
             throw "Built-in JIT requires normal compatibility mode. Turn off Classic Mode for this app, then retry."
         }
-        let preferredMultitask = classicMode == 0 ? (multitask ?? (builtInJIT ? false : shouldLaunchInMultitaskMode)) : false
+        let preferredMultitask = hostJIT ? false : (classicMode == 0 ? (multitask ?? (builtInJIT ? false : shouldLaunchInMultitaskMode)) : false)
         // Keep the JIT target alive in a full-screen guest when normal presentation is requested.
-        let fullScreenJIT = builtInJIT && !preferredMultitask
+        let fullScreenJIT = builtInJIT && !hostJIT && !preferredMultitask
         let multitask = preferredMultitask || fullScreenJIT
         
         if MultitaskManager.isMultitasking() || multitask,
@@ -346,7 +353,13 @@ class LCAppModel: ObservableObject, Hashable {
 #if targetEnvironment(simulator)
         jitNeeded = false
 #endif
-        if jitNeeded {
+        if jitNeeded && hostJIT {
+            guard let relative = appInfo.relativeBundlePath, let folder = uiSelectedContainer?.folderName else { throw "HostJIT needs a registered guest and data container." }
+            let hostPairingURL = await LiveBoardBuiltInJIT.pairingURL
+            guard FileManager.default.fileExists(atPath: hostPairingURL.path) else { throw "Import a pairing file and prepare the device before testing HostJIT." }
+            UserDefaults.standard.set(["app": relative, "container": folder, "created": Date().timeIntervalSince1970, "script": resolvedJITScript ?? LCUtils.base64EncodedUniversalJITScript()], forKey: "StrataHostJITRequest")
+            LCSharedUtils.launchToGuestApp(withClassicMode: classicMode)
+        } else if jitNeeded {
             if multitask, #available(iOS 17.4, *) {
                 try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                     LCUtils.launchMultitaskGuestApp(appInfo.displayName(), fullScreen: fullScreenJIT, waitForJIT: builtInJIT) { pidNumber, error in

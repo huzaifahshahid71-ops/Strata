@@ -3,15 +3,106 @@
 #import "UIKitPrivate.h"
 #import "utils.h"
 @import MachO;
+#include <sys/sysctl.h>
+#include <sys/file.h>
+#include <fcntl.h>
+#import <objc/message.h>
 
 extern NSUserDefaults *lcUserDefaults;
 extern NSString *lcAppUrlScheme;
 extern NSBundle *lcMainBundle;
+static int strataGuestDataFD = -1;
+static NSExtension *strataHostHelper;
 
 NSString* FBSOpenApplicationOptionKeyActivateAsClassic = @"__ActivateAsClassic";
 NSString* FBSOpenApplicationOptionKeyPayloadURL = @"__PayloadURL";
 
 @implementation LCSharedUtils
+
++ (void)strataStopHostJIT {
+    if (strataHostHelper) { [strataHostHelper _kill:0]; strataHostHelper = nil; }
+    NSUserDefaults *preferences = [[NSUserDefaults alloc] initWithSuiteName:self.appGroupID];
+    [preferences removeObjectForKey:@"StrataJITVPNOwnerPID"];
+    [preferences removeObjectForKey:@"StrataJITVPNActiveUntil"];
+}
+
++ (void)strataReleaseGuestDataLease { if (strataGuestDataFD >= 0) { close(strataGuestDataFD); strataGuestDataFD = -1; } }
+
++ (NSString *)strataAcquireGuestDataLease:(NSString *)container {
+
+    if (!container.length || ![container.lastPathComponent isEqualToString:container] || [container isEqualToString:@"."] || [container isEqualToString:@".."]) return @"Invalid guest data container.";
+    NSURL *root = [self.appGroupPath URLByAppendingPathComponent:@"Library/StrataDataLocks"];
+    if (!root || ![NSFileManager.defaultManager createDirectoryAtURL:root withIntermediateDirectories:YES attributes:nil error:nil]) return @"Cannot open the guest data lock directory.";
+    NSURL *file = [root URLByAppendingPathComponent:[container stringByAppendingString:@".lock"]];
+    int fd = open(file.fileSystemRepresentation, O_CREAT | O_RDWR | O_NOFOLLOW, 0600);
+    if (fd < 0 || flock(fd, LOCK_SH | LOCK_NB) != 0) {
+        if (fd >= 0) close(fd);
+        return @"A backup, restore or file import is using this guest's data. Wait for it to finish before launching.";
+    }
+    if (strataGuestDataFD >= 0) close(strataGuestDataFD);
+    strataGuestDataFD = fd; // Released automatically when this guest process exits.
+    return nil;
+}
+
++ (NSString *)strataAttachHostJIT:(NSDictionary *)request {
+    // Cold-start experiment: the debugger lives in JITHelper; the target is this
+    // host PID. Retain the helper for the lifetime of the executing guest.
+
+    if (@available(iOS 17.4, *)) {
+        void *task = SecTaskCreateFromSelf(NULL);
+        CFTypeRef flag = task ? SecTaskCopyValueForEntitlement(task, CFSTR("get-task-allow"), NULL) : NULL;
+        BOOL permitted = flag && CFEqual(flag, kCFBooleanTrue);
+        if (flag) CFRelease(flag); if (task) CFRelease(task);
+        if (!permitted) return @"HostJIT requires get-task-allow on Strata. Use the existing guest-extension JIT path.";
+        NSURL *root = self.appGroupPath;
+        NSString *home = NSProcessInfo.processInfo.environment[@"LC_HOME_PATH"] ?: NSHomeDirectory();
+        NSURL *pairingURL = [NSURL fileURLWithPath:[home stringByAppendingPathComponent:@"Documents/StrataJIT/pairingFile.plist"]];
+        NSData *pairing = [NSData dataWithContentsOfURL:pairingURL];
+        if (!root || !pairing.length || pairing.length >= 2000000) return @"Import a pairing file and prepare the device before testing HostJIT.";
+        NSUserDefaults *preferences = [[NSUserDefaults alloc] initWithSuiteName:self.appGroupID];
+        NSString *address = [[preferences stringForKey:@"StrataJITDeviceAddress"] ?: @"10.7.0.1" componentsSeparatedByString:@"/"][0];
+        NSInteger port = ([preferences stringForKey:@"StrataJITRemotePairPort"] ?: @"49152").integerValue;
+        NSString *token = NSUUID.UUID.UUIDString;
+        NSURL *statusURL = [root URLByAppendingPathComponent:[NSString stringWithFormat:@"Library/StrataJIT/%@.json", token]];
+        NSURL *diagnosticURL = [root URLByAppendingPathComponent:@"Library/StrataDiagnostics/host-jit.json"];
+        void (^record)(NSString *, BOOL) = ^(NSString *message, BOOL attached) {
+            [NSFileManager.defaultManager createDirectoryAtURL:diagnosticURL.URLByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
+            struct kinfo_proc process = {0}; size_t processSize = sizeof(process); int mib[] = {CTL_KERN,KERN_PROC,KERN_PROC_PID,getpid()};
+            BOOL tracing = sysctl(mib, 4, &process, &processSize, NULL, 0) == 0 && (process.kp_proc.p_flag & P_TRACED);
+            NSDictionary *object = @{@"schema":@1,@"pid":@(getpid()),@"executionMode":@"inProcess",@"debuggerAttached":@(tracing),@"codeSigningDebugged":@(attached),@"JITVerified":@NO,@"message":message,@"sampledAt":@(NSDate.date.timeIntervalSince1970)};
+            [[NSJSONSerialization dataWithJSONObject:object options:0 error:nil] writeToURL:diagnosticURL options:NSDataWritingAtomic error:nil];
+        };
+        NSError *error = nil;
+        strataHostHelper = [NSExtension extensionWithIdentifier:[lcMainBundle.bundleIdentifier stringByAppendingString:@".JITHelper"] error:&error];
+        if (!strataHostHelper) { record(@"JIT helper unavailable.", NO); return @"HostJIT helper unavailable. Keep all app extensions when signing."; }
+        NSExtensionItem *item = [NSExtensionItem new];
+        item.userInfo = @{@"strataJIT":@YES,@"group":self.appGroupID,@"operation":@"enable",@"token":token,@"pid":@(getpid()),@"pairing":pairing,@"script":request[@"script"] ?: @"",@"deviceAddress":address,@"remotePairPort":@(port)};
+        [preferences setInteger:getpid() forKey:@"StrataJITVPNOwnerPID"];
+        [preferences setDouble:NSDate.date.timeIntervalSince1970 + 30 forKey:@"StrataJITVPNActiveUntil"];
+        [strataHostHelper beginExtensionRequestWithInputItems:@[item] completion:^(NSUUID *requestID) {}];
+        record(@"Waiting for debugger on the cold-start host process.", NO);
+        NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + 12;
+        NSString *failure = @"HostJIT attachment timed out. Prepare the device with LocalDevVPN connected, then retry or disable HostJIT for this guest.";
+        while (NSProcessInfo.processInfo.systemUptime < deadline) {
+            unsigned int codeFlags = 0;
+            if (csops(getpid(), 0, &codeFlags, sizeof(codeFlags)) == 0 && (codeFlags & CS_DEBUGGED)) {
+                record(@"Host marked debugged; entering guest runtime. JIT execution still requires verification.", YES);
+                return nil;
+            }
+            NSData *data = [NSData dataWithContentsOfURL:statusURL];
+            NSDictionary *status = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+            if ([status isKindOfClass:NSDictionary.class] && [status[@"done"] boolValue] && ![status[@"success"] boolValue]) { failure = @"HostJIT helper failed. Inspect the latest host-JIT diagnostic and use the existing JIT path."; break; }
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, false);
+            [NSThread sleepForTimeInterval:0.01];
+        }
+        [strataHostHelper _kill:0]; strataHostHelper = nil;
+        [preferences removeObjectForKey:@"StrataJITVPNOwnerPID"];
+        [preferences removeObjectForKey:@"StrataJITVPNActiveUntil"];
+        record(failure, NO);
+        return failure;
+    }
+    return @"HostJIT requires iOS 17.4 or later.";
+}
 
 + (NSString*) teamIdentifier {
     static NSString* ans = nil;
@@ -119,8 +210,76 @@ NSString* FBSOpenApplicationOptionKeyPayloadURL = @"__PayloadURL";
 }
 
 + (NSString *)certificatePassword {
+    NSDictionary *identity = [self strataSigningIdentity];
+    if (identity) return identity[@"password"];
     NSUserDefaults* nud = NSUserDefaults.lcSharedDefaults ?: NSUserDefaults.standardUserDefaults;
     return [nud objectForKey:@"LCCertificatePassword"];
+}
+
+// A single Keychain item replaces identity and password atomically. All execution
+// paths use the already-provisioned shared group; no new entitlement is requested.
++ (NSMutableDictionary *)strataIdentityQuery {
+    NSMutableDictionary *q = [@{(__bridge id)kSecClass:(__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrService:@"com.strata.signing.v1", (__bridge id)kSecAttrAccount:@"activeIdentity"} mutableCopy];
+#if !TARGET_OS_SIMULATOR
+    NSString *team = self.teamIdentifier;
+    if (team.length) q[(__bridge id)kSecAttrAccessGroup] = [team stringByAppendingString:@".com.kdt.livecontainer.shared"];
+#endif
+    return q;
+}
++ (NSDictionary *)strataSigningIdentity {
+    NSMutableDictionary *q = [self strataIdentityQuery];
+    q[(__bridge id)kSecReturnData] = @YES;
+    q[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
+    CFTypeRef result = NULL;
+    if (SecItemCopyMatching((__bridge CFDictionaryRef)q, &result) != errSecSuccess) return nil;
+    NSData *bytes = CFBridgingRelease(result);
+    if (![bytes isKindOfClass:NSData.class]) return nil;
+    NSDictionary *record = [NSPropertyListSerialization propertyListWithData:bytes options:0 format:nil error:nil];
+    if (![record isKindOfClass:NSDictionary.class] || ![record[@"p12"] isKindOfClass:NSData.class] || ![record[@"password"] isKindOfClass:NSString.class]) return nil;
+    return record;
+}
++ (BOOL)strataStoreSigningIdentity:(NSData *)p12 password:(NSString *)password error:(NSError **)error {
+    if (!p12.length || p12.length > 16*1024*1024 || !password) {
+        if (error) *error = [NSError errorWithDomain:@"StrataIdentity" code:1 userInfo:@{NSLocalizedDescriptionKey:@"Choose a valid .p12 signing identity."}];
+        return NO;
+    }
+    // Reuse the shipping signer's PKCS#12/private-key validation. Apple's native
+    // importer rejects some valid empty-password encodings that this signer accepts.
+    Class validator = NSClassFromString(@"LCUtils");
+    SEL selector = NSSelectorFromString(@"getCertTeamIdWithKeyData:password:");
+    NSString *team = [validator respondsToSelector:selector] ? ((id (*)(id, SEL, id, id))objc_msgSend)(validator, selector, p12, password) : nil;
+    if (!team.length) {
+        if (error) *error = [NSError errorWithDomain:@"StrataIdentity" code:2 userInfo:@{NSLocalizedDescriptionKey:@"The .p12 could not be opened with that password, or has no usable signing private key."}];
+        return NO;
+    }
+    OSStatus status;
+    NSData *bytes = [NSPropertyListSerialization dataWithPropertyList:@{@"schema":@1,@"p12":p12,@"password":password,@"importedAt":NSDate.date} format:NSPropertyListBinaryFormat_v1_0 options:0 error:error];
+    if (!bytes) return NO;
+    NSMutableDictionary *q = [self strataIdentityQuery];
+    NSDictionary *attributes = @{(__bridge id)kSecValueData:bytes,(__bridge id)kSecAttrAccessible:(__bridge id)kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly};
+    status = SecItemUpdate((__bridge CFDictionaryRef)q, (__bridge CFDictionaryRef)attributes);
+    if (status == errSecItemNotFound) {
+        [q addEntriesFromDictionary:attributes];
+        status = SecItemAdd((__bridge CFDictionaryRef)q, NULL);
+    }
+    if (status != errSecSuccess && error) *error = [NSError errorWithDomain:@"StrataIdentity" code:status userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"The shared Keychain could not save the identity (%d). The previous identity was retained.", (int)status]}];
+    if (status == errSecSuccess) {
+        NSDictionary *stored = [self strataSigningIdentity];
+        if (![stored[@"p12"] isEqual:p12] || ![stored[@"password"] isEqual:password]) {
+            if (error) *error = [NSError errorWithDomain:@"StrataIdentity" code:3 userInfo:@{NSLocalizedDescriptionKey:@"The saved identity could not be read back. Legacy credentials were retained; retry after unlocking the device."}];
+            return NO;
+        }
+    }
+    return status == errSecSuccess;
+}
++ (BOOL)strataRemoveSigningIdentityWithError:(NSError **)error {
+    OSStatus status = SecItemDelete((__bridge CFDictionaryRef)[self strataIdentityQuery]);
+    if (status != errSecSuccess && status != errSecItemNotFound) {
+        if (error) *error = [NSError errorWithDomain:@"StrataIdentity" code:status userInfo:@{NSLocalizedDescriptionKey:@"The shared Keychain identity could not be removed."}];
+        return NO;
+    }
+    return YES;
 }
 
 + (BOOL)launchToGuestAppWithClassicMode:(NSUInteger)classicMode {
