@@ -45,6 +45,7 @@ static NSString * const kEmbeddedMetalSource = @""
 "    float disocclusionThreshold;\n"
 "    float motionDeadzone;\n"
 "    float debugTint;\n"
+"    float phase;\n"
 "};\n"
 "\n"
 "struct RasterizerData {\n"
@@ -342,9 +343,9 @@ static NSString * const kEmbeddedMetalSource = @""
 "            }\n"
 "        }\n"
 "    }\n"
-"    float2 uvCurr = clamp(uv + effMV * t, float2(0.001f), float2(0.999f));\n"
-"    float2 uvPrev = clamp(uv - effMV * t, float2(0.001f), float2(0.999f));\n"
-"    float sharePrev = 0.5f;\n"
+"    float2 uvCurr = clamp(uv + effMV * (2.0f * t * (1.0f - uniforms.phase)), float2(0.001f), float2(0.999f));\n"
+"    float2 uvPrev = clamp(uv - effMV * (2.0f * t * uniforms.phase), float2(0.001f), float2(0.999f));\n"
+"    float sharePrev = 1.0f - uniforms.phase;\n"
 "    float pace = length(effMV);\n"
 "    if (pace > 0.0015f) {\n"
 "        float2 mvAtCurr = motionVectors.sample(linearSampler, uvCurr).xy;\n"
@@ -427,6 +428,7 @@ static const MetalFGVertex kQuadVertices[6] = {
         _inFlightGpuFrames = 0;
         _debugTintEnabled = NO;
         _motionScale = 0.50f;
+        _interpolationPhase = 0.5f;
         _disocclusionThreshold = 0.18f;
         _uiSensitivity = 0.035f;
         _motionDeadzone = 0.0003f;
@@ -698,6 +700,7 @@ static const MetalFGVertex kQuadVertices[6] = {
     warpUniforms.disocclusionThreshold = self.disocclusionThreshold;
     warpUniforms.motionDeadzone = self.motionDeadzone;
     warpUniforms.debugTint = self.debugTintEnabled ? 1.0f : 0.0f;
+    warpUniforms.phase = self.interpolationPhase;
     [enc setFragmentBytes:&warpUniforms length:sizeof(warpUniforms) atIndex:MetalFGBufferIndexWarpUniforms];
     
     [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
@@ -855,6 +858,7 @@ static const MetalFGVertex kQuadVertices[6] = {
     warpUniforms.disocclusionThreshold = self.disocclusionThreshold;
     warpUniforms.motionDeadzone = self.motionDeadzone;
     warpUniforms.debugTint = self.debugTintEnabled ? 1.0f : 0.0f;
+    warpUniforms.phase = self.interpolationPhase;
     [enc setFragmentBytes:&warpUniforms length:sizeof(warpUniforms) atIndex:MetalFGBufferIndexWarpUniforms];
     
     [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
@@ -987,6 +991,7 @@ static const MetalFGVertex kQuadVertices[6] = {
         warpUniforms.disocclusionThreshold = self.disocclusionThreshold;
         warpUniforms.motionDeadzone = self.motionDeadzone;
         warpUniforms.debugTint = self.debugTintEnabled ? 1.0f : 0.0f;
+    warpUniforms.phase = self.interpolationPhase;
         [enc setFragmentBytes:&warpUniforms length:sizeof(warpUniforms) atIndex:MetalFGBufferIndexWarpUniforms];
         
         [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
@@ -1023,6 +1028,49 @@ static const MetalFGVertex kQuadVertices[6] = {
     self.lastFrameSubmitted = YES;
     [cmdBuffer commit];
     return didInterpolate;
+}
+
+// Strata 3x/4x: render another in-between frame at `phase` from the frames and motion vectors cached by the
+// last processAndInterpolateNativeDrawable call (no extra motion estimation).
+- (BOOL)renderInterpolatedPhase:(float)phase toDrawable:(id<CAMetalDrawable>)targetDrawable {
+    if (!targetDrawable || !_isReady) return NO;
+    os_unfair_lock_lock(&_textureLock);
+    BOOL valid = _hasValidBaseFrame;
+    id<MTLTexture> curr = _cachedTextures[_activeReadIndex];
+    id<MTLTexture> prev = _cachedTextures[_activeWriteIndex];
+    id<MTLTexture> mv = _medianPipelineState && _smoothedMotionVectorTexture ? _smoothedMotionVectorTexture : _motionVectorTexture;
+    id<MTLRenderPipelineState> pipeline = _pipelineState;
+    id<MTLBuffer> vertices = _vertexBuffer;
+    os_unfair_lock_unlock(&_textureLock);
+    if (!valid || !curr || !prev || !mv || !pipeline || !vertices) return NO;
+    id<MTLCommandBuffer> cmdBuffer = [_commandQueue commandBuffer];
+    cmdBuffer.label = @"com.metalfg.extraPhase";
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = targetDrawable.texture;
+    pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> enc = [cmdBuffer renderCommandEncoderWithDescriptor:pass];
+    [enc setRenderPipelineState:pipeline];
+    [enc setVertexBuffer:vertices offset:0 atIndex:MetalFGBufferIndexVertices];
+    [enc setFragmentTexture:curr atIndex:MetalFGTextureIndexSource];
+    [enc setFragmentTexture:mv atIndex:MetalFGTextureIndexMotionVectors];
+    [enc setFragmentTexture:prev atIndex:MetalFGTextureIndexPrev];
+    MetalFGWarpUniforms warpUniforms;
+    warpUniforms.timeOffsetFactor = self.motionScale;
+    warpUniforms.disocclusionThreshold = self.disocclusionThreshold;
+    warpUniforms.motionDeadzone = self.motionDeadzone;
+    warpUniforms.debugTint = self.debugTintEnabled ? 1.0f : 0.0f;
+    warpUniforms.phase = phase;
+    [enc setFragmentBytes:&warpUniforms length:sizeof(warpUniforms) atIndex:MetalFGBufferIndexWarpUniforms];
+    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+    [enc endEncoding];
+    objc_setAssociatedObject(targetDrawable, &kMetalFGIsSyntheticKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    StrataPresent(cmdBuffer, targetDrawable, MAX(0, self.presentationDuration));
+    _inFlightGpuFrames.fetch_add(1);
+    __weak MetalFGWarper *weakSelf = self;
+    [cmdBuffer addCompletedHandler:^(id<MTLCommandBuffer> buffer) { MetalFGWarper *strongSelf = weakSelf; if (strongSelf) strongSelf->_inFlightGpuFrames.fetch_sub(1); }];
+    [cmdBuffer commit];
+    return YES;
 }
 
 - (BOOL)presentCachedNativeFrameToDrawable:(id<CAMetalDrawable>)targetDrawable {

@@ -40,18 +40,23 @@ struct LiveBoardRootView: View {
     @EnvironmentObject private var sharedModel: SharedModel
     @AppStorage("LiveBoardMode", store: LCUtils.appGroupUserDefault) private var mode = "ios"
     @State private var interfacePresented = false
-    @AppStorage("StrataResumeAfterSystemClose", store: LCUtils.appGroupUserDefault) private var resumeAfterSystemClose = true
+    @State private var settingsPresented = false
+    @AppStorage("StrataResumeAfterSystemClose", store: LCUtils.appGroupUserDefault) private var resumeAfterSystemClose = false
     @AppStorage("StrataKeepGuestAlive", store: LCUtils.appGroupUserDefault) private var keepGuestAlive = false
     @State private var destinationPresented = false
 
     var body: some View {
         LCAppListView(openInterface: { interfacePresented = true })
-        .onAppear { if mode == "dashboard" || mode == "spotlight" { mode = "cinematic" } } // removed in r40
+        .onAppear { if mode == "dashboard" || mode == "spotlight" { mode = "cinematic" }; StrataMemoryOverlay.shared.apply() }
         .preferredColorScheme(.dark)
         .sheet(isPresented: $interfacePresented, onDismiss: { NotificationCenter.default.post(name: LiveBoardControllerInput.resumeNotification, object: nil) }) {
             NavigationView {
                 ScrollView {
                     VStack(spacing: 16) {
+                        Button { interfacePresented = false; DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { settingsPresented = true } } label: {
+                            Label("Settings", systemImage: "gearshape.fill").font(.headline).frame(maxWidth: .infinity, alignment: .leading).padding(20)
+                                .background(Color.white.opacity(0.08)).clipShape(RoundedRectangle(cornerRadius: 24))
+                        }.buttonStyle(.plain).accessibilityIdentifier("interface.settings")
                         ForEach(LiveBoardMode.allCases) { option in
                             Button { mode = option.rawValue } label: {
                                 HStack(spacing: 16) {
@@ -92,6 +97,14 @@ struct LiveBoardRootView: View {
                 case .apps: EmptyView()
                 }
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .strataOpenSettings)) { _ in
+            NotificationCenter.default.post(name: LiveBoardControllerInput.pauseNotification, object: nil)
+            if interfacePresented { interfacePresented = false; DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { settingsPresented = true } } else { settingsPresented = true }
+        }
+        .fullScreenCover(isPresented: $settingsPresented, onDismiss: { NotificationCenter.default.post(name: LiveBoardControllerInput.resumeNotification, object: nil) }) {
+            StrataSettingsApp(openInterface: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { interfacePresented = true } }, close: { settingsPresented = false })
+                .environmentObject(sharedModel)
         }
         .onChange(of: sharedModel.selectedTab) { tab in
             if tab != .apps { NotificationCenter.default.post(name: LiveBoardControllerInput.pauseNotification, object: nil) }

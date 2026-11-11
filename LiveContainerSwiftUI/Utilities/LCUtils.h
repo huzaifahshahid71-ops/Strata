@@ -33,6 +33,7 @@ uint32_t dyld_get_sdk_version(const struct mach_header* mh);
 + (BOOL)strataCanDebug;
 + (NSDictionary *)strataMemoryStatus;
 + (void)strataToggleAppSwitcher;
++ (void)strataSetSwitcherLiveProvider:(UIView * _Nullable (^)(NSString *key))live front:(NSString * _Nullable (^)(void))front;
 + (NSObject *)strataStartJITHelper:(NSDictionary *)payload error:(NSError **)error;
 + (void)strataStopJITHelper:(NSObject *)helper;
 

@@ -45,6 +45,9 @@
     if ([bridge respondsToSelector:@selector(cancel)]) [(id<StrataRefreshBridgeAPI>)bridge cancel];
 }
 
++ (void)strataSetSwitcherLiveProvider:(UIView *(^)(NSString *))live front:(NSString *(^)(void))front {
+    StrataSetSwitcherProviders(live, front);
+}
 + (void)strataToggleAppSwitcher {
     UIWindow *window = nil;
     for (UIWindowScene *scene in UIApplication.sharedApplication.connectedScenes) {

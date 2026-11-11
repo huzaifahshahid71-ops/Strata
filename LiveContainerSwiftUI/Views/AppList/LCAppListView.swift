@@ -99,7 +99,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
 
     @AppStorage(StrataLauncherOrder.key, store: LCUtils.appGroupUserDefault) private var launcherOrder = "[]"
     var launcherApps: [LCAppModel] {
-        StrataLauncherOrder.apply(sortedApps + (builtInSideStore.map { [$0] } ?? []) + phoneApps.models, order: launcherOrder)
+        StrataLauncherOrder.apply(sortedApps + (builtInSideStore.map { [$0] } ?? []) + phoneApps.models + (StrataBuiltInSettings.model.map { [$0] } ?? []), order: launcherOrder)
     }
 
     var filteredLauncherApps: [LCAppModel] {
@@ -109,6 +109,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     }
 
     func manageLauncherApp(_ app: LCAppModel) {
+        if app.appInfo is StrataSettingsAppInfo { NotificationCenter.default.post(name: .strataOpenSettings, object: nil); return }
         if app.appInfo is StrataPhoneAppInfo {
             openNavigationView(view: AnyView(StrataPhoneAppsView()))
             return
@@ -276,6 +277,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
             
             .onReceive(NotificationCenter.default.publisher(for: Notification.Name("StrataLaunchFromControls"))) { _ in consumeControlsLaunch() }
+            .onReceive(NotificationCenter.default.publisher(for: .strataOpenAppManagement)) { _ in manageLibrary = true }
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
                 StrataControlsLibrary.publish(launcherApps); consumeControlsLaunch()
             }
@@ -567,7 +569,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             return
         }
         UserDefaults.standard.removeObject(forKey: "StrataResumeGuest")
-        let enabled = LCUtils.appGroupUserDefault.object(forKey: "StrataResumeAfterSystemClose") as? Bool ?? true
+        let enabled = LCUtils.appGroupUserDefault.object(forKey: "StrataResumeAfterSystemClose") as? Bool ?? false
         let age = Date().timeIntervalSince1970 - time
         guard enabled, age >= 0, age < 6 * 3600 else { return }
         Task { await launchFromLiveBoard(app) }
@@ -584,6 +586,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
 
     @MainActor
     func launchFromLiveBoard(_ app: LCAppModel, forceJIT: Bool = false, gameMode: Bool = false, multitask: Bool? = nil, metalHUD: Bool = false) async {
+        if app.appInfo is StrataSettingsAppInfo { NotificationCenter.default.post(name: .strataOpenSettings, object: nil); return }
+        // Recent apps for the card switcher, most recent first.
+        let recentKey = liveBoardAppKey(app)
+        var recents = LCUtils.appGroupUserDefault.stringArray(forKey: "StrataRecentApps") ?? []
+        recents.removeAll { $0 == recentKey }; recents.insert(recentKey, at: 0)
+        LCUtils.appGroupUserDefault.set(Array(recents.prefix(12)), forKey: "StrataRecentApps")
         if let shortcut = app.appInfo as? StrataPhoneAppInfo {
             do { try await phoneApps.open(shortcut.entryID) } catch { errorInfo = error.localizedDescription; errorShow = true }
             return
@@ -598,7 +606,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // Games and Ports launch through the Game Mode path automatically (full screen, Game Mode metadata),
         // unless the user explicitly asked for a multitask window.
         let category = LiveBoardSharedCategories.category(forKey: liveBoardAppKey(app))
-        let automaticGameMode = multitask != true && (category == "Games" || category == "Ports")
+        // With seamless switching, Game Mode already applies to Strata as a whole; keep games switchable.
+        let seamless = LCUtils.appGroupUserDefault.object(forKey: "StrataSeamlessSwitching") as? Bool ?? true
+        let automaticGameMode = !seamless && multitask != true && (category == "Games" || category == "Ports")
         do {
             try await app.launchFromLibrary(multitask: multitask, forceJIT: forceJIT, gameMode: gameMode || automaticGameMode, metalHUD: metalHUD)
         } catch {
@@ -885,31 +895,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         
         if let appToReplace {
-            // copy previous configration to new app
-            finalNewApp.autoSaveDisabled = true
-            finalNewApp.isLocked = appToReplace.appInfo.isLocked
-            finalNewApp.isHidden = appToReplace.appInfo.isHidden
-            finalNewApp.isJITNeeded = appToReplace.appInfo.isJITNeeded
-            finalNewApp.isShared = appToReplace.appInfo.isShared
-            finalNewApp.spoofSDKVersion = appToReplace.appInfo.spoofSDKVersion
-            finalNewApp.doSymlinkInbox = appToReplace.appInfo.doSymlinkInbox
-            finalNewApp.containerInfo = appToReplace.appInfo.containerInfo
-            finalNewApp.tweakFolder = appToReplace.appInfo.tweakFolder
-            finalNewApp.selectedLanguage = appToReplace.appInfo.selectedLanguage
-            finalNewApp.dataUUID = appToReplace.appInfo.dataUUID
-            finalNewApp.orientationLock = appToReplace.appInfo.orientationLock
-            finalNewApp.dontInjectTweakLoader = appToReplace.appInfo.dontInjectTweakLoader
-            finalNewApp.hideLiveContainer = appToReplace.appInfo.hideLiveContainer
-            finalNewApp.dontLoadTweakLoader = appToReplace.appInfo.dontLoadTweakLoader
-            finalNewApp.doUseLCBundleId = appToReplace.appInfo.doUseLCBundleId
-            finalNewApp.fixFilePickerNew = appToReplace.appInfo.fixFilePickerNew
-            finalNewApp.fixLocalNotification = appToReplace.appInfo.fixLocalNotification
-            finalNewApp.lastLaunched = appToReplace.appInfo.lastLaunched
-            finalNewApp.jitLaunchScriptJs = appToReplace.appInfo.jitLaunchScriptJs
-            finalNewApp.multitaskSpecified = appToReplace.appInfo.multitaskSpecified
-            finalNewApp.classicMode = appToReplace.appInfo.classicMode
-            finalNewApp.autoSaveDisabled = false
-            finalNewApp.save()
+            LCAppModel.copy(fromApp: appToReplace, toAppInfo: finalNewApp)
         } else {
             // enable SDK version spoof by defalut
             finalNewApp.spoofSDKVersion = true

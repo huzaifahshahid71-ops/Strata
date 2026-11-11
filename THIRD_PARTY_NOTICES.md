@@ -18,3 +18,7 @@ StosSign (https://github.com/stossy11/StosSign), f8075577623707bd7899a884f31f2c4
 
 Upstream: https://github.com/dnullptr/MetalFG
 Pinned revision: c6e5f49cb4eb1a466eca1c66e3bf200ebbdab9e9. MIT license, retained at Vendor/MetalFG/LICENSE. Strata adapts the warper and touch tracker; it does not load upstream jailbreak injection, synchronizer or UI. Port changes are documented in Vendor/MetalFG/UPSTREAM.txt and FrameGeneration/.
+
+## ryC0
+
+The App Switcher deck layout and gesture model in `LiveContainer/StrataGuestControls.m` are adapted from ryC0 (`LiveContainerSwiftUI/Home/Screen/AppSwitcherView.swift`), https://github.com/Sami-Wali/ryC0, licensed under the GNU Affero General Public License v3.0, the same licence as Strata.

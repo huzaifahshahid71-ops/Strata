@@ -130,6 +130,20 @@
 - (BOOL)prefersHomeIndicatorAutoHidden { return self.immersivePresented; }
 - (void)presentImmersiveFrom:(UIViewController *)presenter {
     if (!self.immersiveRequested || self.immersivePresented || !self.appSceneVC.isAppRunning) return;
+    // Switching from another full-screen app: iOS won't present over it, so keep its last frame on screen,
+    // step it aside, then grow this app in over that frame (no flash, no failed switch).
+    UIViewController *current = presenter.presentedViewController;
+    if ([current isKindOfClass:DecoratedAppSceneViewController.class] && current != self) {
+        UIWindow *window = presenter.view.window;
+        UIView *cover = [current.view snapshotViewAfterScreenUpdates:NO];
+        if (cover && window) { cover.frame = window.bounds; [window addSubview:cover]; }
+        __weak typeof(self) weakSelf = self;
+        [(DecoratedAppSceneViewController *)current dismissImmersiveAnimated:NO completion:^{
+            [weakSelf presentImmersiveFrom:presenter];
+            [UIView animateWithDuration:0.25 delay:0.12 options:0 animations:^{ cover.alpha = 0; } completion:^(BOOL f) { [cover removeFromSuperview]; }];
+        }];
+        return;
+    }
     self.immersivePresented = YES;
     [self willMoveToParentViewController:nil];
     [self.view removeFromSuperview];
@@ -144,7 +158,15 @@
     MultitaskDockManager.shared.immersiveGuestActive = YES;
     [NSNotificationCenter.defaultCenter postNotificationName:@"LiveBoardPauseController" object:nil];
     [self updateVerticalConstraints];
+    // iOS-style open: the app grows into place instead of popping on screen.
+    BOOL animate = !UIAccessibilityIsReduceMotionEnabled();
+    if (animate) { self.view.transform = CGAffineTransformMakeScale(0.84, 0.84); self.view.alpha = 0; self.view.layer.cornerRadius = 44; self.view.clipsToBounds = YES; }
     [presenter presentViewController:self animated:NO completion:^{
+        if (animate) {
+            [UIView animateWithDuration:0.38 delay:0 usingSpringWithDamping:0.88 initialSpringVelocity:0 options:UIViewAnimationOptionAllowUserInteraction animations:^{
+                self.view.transform = CGAffineTransformIdentity; self.view.alpha = 1; self.view.layer.cornerRadius = 0;
+            } completion:^(BOOL f) { self.view.clipsToBounds = NO; }];
+        }
         [self setNeedsStatusBarAppearanceUpdate];
         [self setNeedsUpdateOfHomeIndicatorAutoHidden];
         [self setNeedsUpdateOfSupportedInterfaceOrientations];
@@ -317,16 +339,31 @@
     }
 }
 
-- (void)minimizeWindow {
-    if (self.immersivePresented) {
-        UIViewController *root = self.presentingViewController;
+- (void)dismissImmersiveAnimated:(BOOL)animated completion:(void (^)(void))completion {
+    if (!self.immersivePresented) { if (completion) completion(); return; }
+    UIViewController *root = self.presentingViewController;
+    void (^finish)(void) = ^{
         [self dismissViewControllerAnimated:NO completion:^{
             self.immersivePresented = NO;
             MultitaskDockManager.shared.immersiveGuestActive = NO;
+            self.view.transform = CGAffineTransformIdentity; self.view.alpha = 1; self.view.layer.cornerRadius = 0;
             [MultitaskDockManager.shared.windowHostingView addSubview:self.view];
             [root addChildViewController:self];
             [self didMoveToParentViewController:root];
             self.view.hidden = YES;
+            if (completion) completion();
+        }];
+    };
+    if (!animated || UIAccessibilityIsReduceMotionEnabled()) { finish(); return; }
+    // iOS-style close: the app shrinks and fades back into the launcher.
+    self.view.clipsToBounds = YES;
+    [UIView animateWithDuration:0.3 delay:0 usingSpringWithDamping:0.95 initialSpringVelocity:0 options:0 animations:^{
+        self.view.transform = CGAffineTransformMakeScale(0.82, 0.82); self.view.alpha = 0; self.view.layer.cornerRadius = 44;
+    } completion:^(BOOL f) { finish(); }];
+}
+- (void)minimizeWindow {
+    if (self.immersivePresented) {
+        [self dismissImmersiveAnimated:YES completion:^{
             [NSNotificationCenter.defaultCenter postNotificationName:@"LiveBoardResumeController" object:nil];
         }];
         return;

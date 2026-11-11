@@ -58,3 +58,34 @@ void StrataStartProcessMemoryDiagnostics(NSString *group, NSString *guestName, N
     dispatch_source_set_event_handler(timer, sample);
     dispatch_resume(timer);
 }
+
+// Live memory overlay: every Strata process (Strata, apps in their own process, helper/donor processes)
+// writes its footprint and limit once a second while the overlay is enabled.
+void StrataStartMemoryOverlaySampler(NSString *group, NSString *role, NSString *name) {
+    static dispatch_source_t timer;
+    static NSString *currentRole, *currentName;
+    static NSUserDefaults *settings;
+    static NSURL *file;
+    @synchronized ([NSProcessInfo class]) { currentRole = [role copy]; currentName = [name copy]; }
+    if (timer || !group) return;
+    NSURL *root = [NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:group];
+    if (!root) return;
+    NSURL *directory = [root URLByAppendingPathComponent:@"Library/StrataDiagnostics/Live" isDirectory:YES];
+    file = [directory URLByAppendingPathComponent:[NSString stringWithFormat:@"proc-%d.json", getpid()]];
+    settings = [[NSUserDefaults alloc] initWithSuiteName:group];
+    timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), NSEC_PER_SEC, NSEC_PER_SEC / 5);
+    dispatch_source_set_event_handler(timer, ^{
+        if (![settings boolForKey:@"StrataMemoryOverlay"]) { [NSFileManager.defaultManager removeItemAtURL:file error:nil]; return; }
+        task_vm_info_data_t vm = {0};
+        mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+        if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vm, &count) != KERN_SUCCESS) return;
+        NSString *r, *n;
+        @synchronized ([NSProcessInfo class]) { r = currentRole ?: @"process"; n = currentName ?: @""; }
+        NSDictionary *sample = @{@"pid": @(getpid()), @"role": r, @"name": n, @"footprint": @(vm.phys_footprint),
+                                 @"available": @(os_proc_available_memory()), @"time": @(NSDate.date.timeIntervalSince1970)};
+        [NSFileManager.defaultManager createDirectoryAtURL:directory withIntermediateDirectories:YES attributes:nil error:nil];
+        [[NSJSONSerialization dataWithJSONObject:sample options:0 error:nil] writeToURL:file atomically:YES];
+    });
+    dispatch_resume(timer);
+}

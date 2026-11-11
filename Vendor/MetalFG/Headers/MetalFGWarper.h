@@ -26,6 +26,7 @@ extern const char kMetalFGIsSyntheticKey;
 @property (nonatomic, assign) float uiSensitivity;           // Default 0.035 (static UI threshold)
 @property (nonatomic, assign) float motionDeadzone;          // Default 0.0004 (velocity cutoff)
 @property (nonatomic, assign) BOOL debugTintEnabled;
+@property (nonatomic, assign) float interpolationPhase;     // Strata: 0..1, default 0.5 (2x midpoint)
 
 // Strata port: real completion counters and offscreen uncapped generation.
 @property (nonatomic) CFTimeInterval presentationDuration;
@@ -54,6 +55,7 @@ extern const char kMetalFGIsSyntheticKey;
 // Option 3: Full 1-Frame Latency True Interpolation Pipeline (v2.0.0)
 - (BOOL)processAndInterpolateNativeDrawable:(id<CAMetalDrawable>)drawable;
 - (BOOL)presentCachedNativeFrameToDrawable:(id<CAMetalDrawable>)targetDrawable;
+- (BOOL)renderInterpolatedPhase:(float)phase toDrawable:(id<CAMetalDrawable>)targetDrawable;
 
 // Check if a synthetic frame is currently processing on GPU
 - (BOOL)isGpuBusy;

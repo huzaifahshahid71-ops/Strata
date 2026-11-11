@@ -252,6 +252,75 @@ static void *getAppEntryPoint(void *handle) {
     return (void *)header + entryoff;
 }
 
+NSString *LCPrepareGuestExtension(NSDictionary *request) {
+    // Unlike an app launch, this process already has a live system extension
+    // context. Only prepare the guest environment and load its request handler.
+    lcMainBundle = NSBundle.mainBundle;
+    lcUserDefaults = NSUserDefaults.standardUserDefaults;
+    isLiveProcess = true;
+    lcAppUrlScheme = @"liveprocess";
+    lcSharedDefaults = [[NSUserDefaults alloc] initWithSuiteName:LCSharedUtils.appGroupID];
+    lcAppGroupPath = [request[@"appGroupPath"] length] ? request[@"appGroupPath"] : nil;
+    guestAppInfo = request[@"guestAppInfo"];
+    guestContainerInfo = request[@"guestContainerInfo"];
+
+    static NSMutableArray<NSURL *> *accessedURLs;
+    accessedURLs = [NSMutableArray array];
+    for (NSData *bookmark in request[@"bookmarks"]) {
+        NSError *error = nil;
+        BOOL stale = NO;
+        NSURL *url = [NSURL URLByResolvingBookmarkData:bookmark options:0 relativeToURL:nil bookmarkDataIsStale:&stale error:&error];
+        if (!url || ![url startAccessingSecurityScopedResource]) {
+            return error.localizedDescription ?: @"Unable to access the guest extension or its container";
+        }
+        [accessedURLs addObject:url];
+    }
+    NSString *bundlePath = request[@"bundlePath"];
+    NSString *appPath = request[@"appBundlePath"];
+    NSString *homePath = request[@"containerPath"];
+    NSString *lcHomePath = request[@"lcHomePath"];
+
+    NSBundle *bundle = [NSBundle bundleWithPath:bundlePath];
+
+    lcGuestAppId = bundle.bundleIdentifier;
+    StrataStartMemoryOverlaySampler(LCSharedUtils.appGroupID, @"helper", bundle.bundleIdentifier ?: @"Helper");
+    NSString *originalHome = NSHomeDirectory();
+    setenv("LP_HOME_PATH", originalHome.fileSystemRepresentation, 1);
+    setenv("LC_HOME_PATH", lcHomePath.fileSystemRepresentation, 1);
+    setenv("HOME", homePath.fileSystemRepresentation, 1);
+    setenv("CFFIXED_USER_HOME", homePath.fileSystemRepresentation, 1);
+    setenv("TMPDIR", [[homePath stringByAppendingPathComponent:@"tmp"] stringByAppendingString:@"/"].fileSystemRepresentation, 1);
+    overwriteMainNSBundle(bundle);
+    overwriteMainCFBundle();
+    const char *executablePath = strdup(bundle.executablePath.fileSystemRepresentation);
+    *_CFGetProcessPath() = executablePath;
+    overwriteExecPath(executablePath);
+    NUDGuestHooksInit();
+    NSFMGuestExtensionHooksInit(request[@"parentContainerPath"]);
+    NSURLSCGuestHooksInit();
+
+    if (checkJITEnabled()) init_bypassDyldLibValidation();
+    DyldHooksInit(false, true, 0);
+    appMainImageIndex = _dyld_image_count();
+    __block void *handle = NULL;
+    void (^load)(void) = ^{
+        handle = dlopen_nolock(bundle.executablePath.fileSystemRepresentation, RTLD_LAZY | RTLD_GLOBAL | RTLD_FIRST);
+    };
+    NSDictionary *patchInfo = [NSDictionary dictionaryWithContentsOfFile:[bundlePath stringByAppendingPathComponent:@"LCAppExtension.plist"]];
+    if (@available(iOS 27.0, *)) {
+        if ([patchInfo[@"segCountMismatch"] boolValue]) bypass_seg_count_check(load);
+        else load();
+    } else {
+        load();
+    }
+    if (!handle) {
+        const char *error = dlerror();
+        return error ? @(error) : @"Unable to load the guest extension";
+    }
+    appExecutableHandle = handle;
+    return nil;
+}
+
 static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContainer, int argc, char *argv[]) {
     NSString *appError = nil;
     if([[lcUserDefaults objectForKey:@"LCWaitForDebugger"] boolValue]) {
@@ -522,6 +591,9 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
     
     // hook NSUserDefault before running libraries' initializers
     NUDGuestHooksInit();
+    if (!isLiveProcess && [guestAppInfo[@"helperProcessesSupport"] boolValue]) {
+        NSExtensionGuestHooksInit(appBundle.bundleURL, [NSURL fileURLWithPath:newHomePath isDirectory:YES]);
+    }
     if(!isSideStore) {
         SecItemGuestHooksInit();
         NSFMGuestHooksInit();
@@ -642,7 +714,7 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
         NSString *fgJSON = [lcSharedDefaults stringForKey:@"StrataFrameGenApps"];
         NSDictionary *fgApps = fgJSON ? [NSJSONSerialization JSONObjectWithData:[fgJSON dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil] : nil;
         NSDictionary *fgConfig = [fgApps isKindOfClass:NSDictionary.class] ? fgApps[hudKey] : nil;
-        if ([fgConfig isKindOfClass:NSDictionary.class] && [@[@"2x", @"benchmark"] containsObject:fgConfig[@"mode"]]) {
+        if ([fgConfig isKindOfClass:NSDictionary.class] && [@[@"2x", @"3x", @"4x", @"benchmark"] containsObject:fgConfig[@"mode"]]) {
             NSString *library = [lcMainBundle.bundlePath stringByAppendingPathComponent:@"Frameworks/StrataFrameGen.dylib"];
             if (![fm fileExistsAtPath:library]) library = [lcMainBundle.bundlePath stringByAppendingPathComponent:@"../../Frameworks/StrataFrameGen.dylib"];
             void *fg = dlopen(library.UTF8String, RTLD_NOW | RTLD_LOCAL);
@@ -736,6 +808,7 @@ int LiveContainerMain(int argc, char *argv[]) {
     lcAppUrlScheme = NSBundle.mainBundle.infoDictionary[@"CFBundleURLTypes"][0][@"CFBundleURLSchemes"][0];
     lcAppGroupPath = [[NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:[NSClassFromString(@"LCSharedUtils") appGroupID]] path];
     isLiveProcess = [lcAppUrlScheme isEqualToString:@"liveprocess"];
+    StrataStartMemoryOverlaySampler([LCSharedUtils appGroupID], isLiveProcess ? @"app" : @"Strata", isLiveProcess ? @"App" : @"Strata");
     setenv("LC_HOME_PATH", getenv("HOME"), 0);
 
     NSString *selectedApp = [lcUserDefaults stringForKey:@"selected"];
@@ -916,6 +989,7 @@ int LiveContainerMain(int argc, char *argv[]) {
         NSString *controlsName = [controlsBundle objectForInfoDictionaryKey:@"CFBundleDisplayName"] ?: [controlsBundle objectForInfoDictionaryKey:@"CFBundleName"] ?: selectedApp ?: @"SideStore";
         NSString *controlsKey = selectedApp ? [NSString stringWithFormat:@"%@:%@", controlsShared ? @"shared" : @"local", selectedApp] : @"builtin:sidestore";
         StrataStartGuestControlsWithIdentity([LCSharedUtils appGroupID], controlsName, isLiveProcess, controlsKey);
+        StrataStartMemoryOverlaySampler([LCSharedUtils appGroupID], isLiveProcess ? @"app" : @"Strata + app", controlsName);
         // iOS often terminates a backgrounded game to reclaim memory; the next cold start would then show the
         // launcher. Remember the guest only while it is in the background so the launcher can reopen it.
         [lcUserDefaults removeObjectForKey:@"StrataResumeGuest"];

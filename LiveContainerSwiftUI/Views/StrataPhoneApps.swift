@@ -1,6 +1,6 @@
 import SwiftUI
 
-final class StrataPhoneAppInfo: LCAppInfo {
+class StrataPhoneAppInfo: LCAppInfo {
     let entryID: UUID
     let phoneBundleIdentifier: String?
     let phoneName: String

@@ -15,6 +15,15 @@ static NSInteger sourceRequest;
 static NSHashTable *gameDisplayLinks;
 static thread_local bool forwardingPresent = false;
 struct PresentForward { bool previous; PresentForward(): previous(forwardingPresent) { forwardingPresent = true; } ~PresentForward() { forwardingPresent = previous; } };
+// The game's most recent committed command buffer: used when a game presents its drawable directly
+// ([drawable present]) instead of through -[MTLCommandBuffer presentDrawable:] (MoltenVK / Metal 4 style).
+static id<MTLCommandBuffer> strataLastCommitted;
+static NSLock *strataCommitLock;
+static void StrataPresentDirect(id<CAMetalDrawable> drawable) { PresentForward guard; [drawable present]; }
+static void StrataOnCompleted(id<MTLCommandBuffer> buffer, BOOL committed, void (^block)(id<MTLCommandBuffer>)) {
+    if (!committed) { [buffer addCompletedHandler:block]; return; }
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{ [buffer waitUntilCompleted]; block(buffer); });
+}
 static NSString *hookKey(Class cls, SEL sel) { return [NSString stringWithFormat:@"%p:%s", cls, sel_getName(sel)]; }
 static IMP originalFor(id obj, SEL sel) {
     [hookLock lock]; IMP found = NULL;
@@ -31,6 +40,8 @@ static void installPresentHooks(Class cls);
     MetalFGWarper *_warper;
     __weak CAMetalLayer *_layer;
     BOOL _benchmark;
+    NSInteger _multiplier;   // requested 2, 3 or 4
+    NSInteger _effective;    // after the display cap
     std::atomic<bool> _metalReady;
     std::atomic<bool> _disabled;
     double _interval, _lastNative, _started;
@@ -42,9 +53,11 @@ static void installPresentHooks(Class cls);
 }
 @property (atomic, copy) NSString *status;
 @property (atomic, copy) NSDictionary *surfaceError;
+@property (atomic, copy) NSString *skipReason;   // why the last native frame was not used for generation
 - (instancetype)initWithConfig:(NSDictionary *)config report:(NSURL *)report;
 - (void)prepare:(CAMetalLayer *)layer;
 - (BOOL)intercept:(id<CAMetalDrawable>)drawable command:(id<MTLCommandBuffer>)buffer;
+- (BOOL)intercept:(id<CAMetalDrawable>)drawable command:(id<MTLCommandBuffer>)buffer committed:(BOOL)committed;
 - (void)observePresented:(id<CAMetalDrawable>)drawable;
 - (void)report;
 - (BOOL)hasMetal;
@@ -54,6 +67,8 @@ static void installPresentHooks(Class cls);
 - (instancetype)initWithConfig:(NSDictionary *)config report:(NSURL *)report {
     if ((self = [super init])) {
         _benchmark = [config[@"mode"] isEqual:@"benchmark"];
+        _multiplier = [config[@"mode"] isEqual:@"4x"] ? 4 : [config[@"mode"] isEqual:@"3x"] ? 3 : 2;
+        _effective = _multiplier;
         _queue = dispatch_queue_create("Strata.FrameGeneration", DISPATCH_QUEUE_SERIAL);
         _gate = dispatch_semaphore_create(1); _interval = 1.0 / 60; _started = CACurrentMediaTime();
         _surfaceFailures = [NSMapTable weakToStrongObjectsMapTable];
@@ -87,7 +102,7 @@ static void installPresentHooks(Class cls);
                 NSArray *links; @synchronized(gameDisplayLinks) { links = gameDisplayLinks.allObjects; }
                 for (CADisplayLink *link in links) link.preferredFramesPerSecond = sourceRequest;
             });
-            self.status = _benchmark ? @"Uncapped offscreen 2× benchmark" : @"2× interpolation active";
+            self.status = _benchmark ? @"Uncapped offscreen 2× benchmark" : [NSString stringWithFormat:@"%ld× interpolation active", (long)_multiplier];
         }
     } @catch (NSException *exception) {
         NSString *reason = exception.reason ?: @"No reason supplied";
@@ -111,14 +126,19 @@ static void installPresentHooks(Class cls);
     }
 #endif
 }
-- (BOOL)intercept:(id<CAMetalDrawable>)drawable command:(id<MTLCommandBuffer>)buffer {
-    if (_disabled || !_warper.isReady || drawable.layer != _layer || drawable.texture.framebufferOnly || [buffer.label hasPrefix:@"com.metalfg."]) return NO;
+- (BOOL)intercept:(id<CAMetalDrawable>)drawable command:(id<MTLCommandBuffer>)buffer { return [self intercept:drawable command:buffer committed:NO]; }
+- (BOOL)intercept:(id<CAMetalDrawable>)drawable command:(id<MTLCommandBuffer>)buffer committed:(BOOL)committed {
+    NSString *skip = _disabled ? @"engine stopped after an error" : !_warper.isReady ? @"optical-flow pipeline not ready"
+        : drawable.layer != _layer ? @"frame from a different Metal layer" : drawable.texture.framebufferOnly ? @"write-only (framebufferOnly) surface"
+        : [buffer.label hasPrefix:@"com.metalfg."] ? @"internal frame" : nil;
+    if (skip) { self.skipReason = skip; return NO; }
+    self.skipReason = nil;
     [self observePresented:drawable];
     if (dispatch_semaphore_wait(_gate, DISPATCH_TIME_NOW)) {
-        [buffer addCompletedHandler:^(id<MTLCommandBuffer> cb) { if (cb.status == MTLCommandBufferStatusCompleted) self->_native.fetch_add(1); }];
+        StrataOnCompleted(buffer, committed, ^(id<MTLCommandBuffer> cb) { if (cb.status == MTLCommandBufferStatusCompleted) self->_native.fetch_add(1); });
         _fallback.fetch_add(1); return NO;
     }
-    [buffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+    StrataOnCompleted(buffer, committed, ^(id<MTLCommandBuffer> cb) {
         if (cb.status != MTLCommandBufferStatusCompleted) { dispatch_semaphore_signal(self->_gate); return; }
         self->_native.fetch_add(1);
         dispatch_async(self->_queue, ^{
@@ -126,12 +146,20 @@ static void installPresentHooks(Class cls);
                 double now = CACurrentMediaTime(), dt = now - self->_lastNative;
                 if (dt > 0.003 && dt < 0.25) self->_interval = self->_lastNative > 0 ? dt : self->_interval;
                 self->_lastNative = now;
-                if (!self->_benchmark && self->_interval * self->_displayMax < 1.85) {
+                // Display cap: never generate more frames than the screen can show between two real frames.
+                NSInteger fit = (NSInteger)floor(self->_interval * self->_displayMax + 0.15);
+                NSInteger effective = self->_benchmark ? 2 : MIN(self->_multiplier, fit);
+                if (!self->_benchmark && effective < 2) {
                     self.status = @"Native cadence already near display limit; interpolation bypassed";
-                    [drawable present]; self->_fallback.fetch_add(1); dispatch_semaphore_signal(self->_gate); return;
+                    StrataPresentDirect(drawable); self->_fallback.fetch_add(1); dispatch_semaphore_signal(self->_gate); return;
                 }
-                self.status = self->_benchmark ? @"Uncapped offscreen 2× benchmark" : @"2× interpolation active";
-                self->_warper.presentationDuration = self->_benchmark ? 0 : MAX(1.0 / self->_displayMax, self->_interval / 2);
+                self->_effective = effective;
+                self.status = self->_benchmark ? @"Uncapped offscreen 2× benchmark"
+                    : effective < self->_multiplier ? [NSString stringWithFormat:@"%ld× (capped from %ld× by the %ld Hz display)", (long)effective, (long)self->_multiplier, (long)self->_displayMax]
+                    : [NSString stringWithFormat:@"%ld× interpolation active", (long)effective];
+                // First in-between frame at 1/N; the rest follow at 2/N .. (N-1)/N.
+                self->_warper.interpolationPhase = 1.0f / (float)effective;
+                self->_warper.presentationDuration = self->_benchmark ? 0 : MAX(1.0 / self->_displayMax, self->_interval / effective);
                 __weak StrataFGEngine *weak = self;
                 self->_warper.frameCompleted = ^(BOOL made, BOOL success) {
                     StrataFGEngine *owner = weak; if (!owner) return;
@@ -141,31 +169,44 @@ static void installPresentHooks(Class cls);
                     dispatch_async(owner->_queue, ^{
                         if (!success) { owner->_disabled = YES; owner.status = @"Generation GPU error; native rendering retained"; }
                         if (owner->_benchmark || !made || !success) { dispatch_semaphore_signal(owner->_gate); return; }
-                        double delay = MAX(1.0 / owner->_displayMax, owner->_interval / 2);
-                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), owner->_queue, ^{
-                            internalDrawable = true;
-                            id<CAMetalDrawable> real = [owner->_layer nextDrawable];
-                            internalDrawable = false;
-                            if (real) { [owner observePresented:real]; [owner->_warper presentCachedNativeFrameToDrawable:real]; }
-                            dispatch_semaphore_signal(owner->_gate);
-                        });
+                        NSInteger count = owner->_effective;
+                        double delay = MAX(1.0 / owner->_displayMax, owner->_interval / count);
+                        // Present the remaining in-between frames (3x/4x), evenly spaced, then the real frame.
+                        __block void (^step)(NSInteger);
+                        void (^stepBlock)(NSInteger) = ^(NSInteger index) {
+                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), owner->_queue, ^{
+                                internalDrawable = true;
+                                id<CAMetalDrawable> next = [owner->_layer nextDrawable];
+                                internalDrawable = false;
+                                if (index < count) {
+                                    if (next) { [owner observePresented:next]; if ([owner->_warper renderInterpolatedPhase:(float)index / (float)count toDrawable:next]) owner->_generated.fetch_add(1); }
+                                    step(index + 1);
+                                } else {
+                                    if (next) { [owner observePresented:next]; [owner->_warper presentCachedNativeFrameToDrawable:next]; }
+                                    step = nil;
+                                    dispatch_semaphore_signal(owner->_gate);
+                                }
+                            });
+                        };
+                        step = stepBlock;
+                        step(2);
                     });
                 };
                 @try {
                     [self->_warper processAndInterpolateNativeDrawable:drawable];
                     if (!self->_warper.lastFrameSubmitted) {
                         self->_disabled = YES; self.status = @"Generation allocation failed; native rendering retained";
-                        if (!self->_benchmark) [drawable present];
+                        if (!self->_benchmark) StrataPresentDirect(drawable);
                         dispatch_semaphore_signal(self->_gate);
                     }
                 } @catch (NSException *exception) {
                     self->_disabled = YES; self.status = @"Generation error; native rendering retained";
-                    if (!self->_benchmark) [drawable present];
+                    if (!self->_benchmark) StrataPresentDirect(drawable);
                     dispatch_semaphore_signal(self->_gate);
                 }
             }
         });
-    }];
+    });
     // In benchmark mode the real native frame presents normally; only GPU generation is offscreen.
     return !_benchmark;
 }
@@ -173,15 +214,15 @@ static void installPresentHooks(Class cls);
     double elapsed = MAX(0.001, CACurrentMediaTime() - _started);
     double native = _native.exchange(0) / elapsed, generated = _generated.exchange(0) / elapsed, shown = _presented.exchange(0) / elapsed;
     _started = CACurrentMediaTime();
-    NSDictionary *data = @{@"schema":@1, @"pid":@(getpid()), @"sampledAt":@(NSDate.date.timeIntervalSince1970), @"nativeGPUFPS":@(native), @"generatedGPUFPS":@(generated), @"computedFPS":@(native + generated), @"presentedFPS":@(shown), @"displayMaximumHz":@(_displayMax), @"benchmark":@(_benchmark), @"status":self.status ?: @"Starting", @"fallbackFrames":@(_fallback.load()), @"surfaceError":self.surfaceError ?: @{}, @"revision":@31};
+    NSDictionary *data = @{@"schema":@1, @"pid":@(getpid()), @"sampledAt":@(NSDate.date.timeIntervalSince1970), @"nativeGPUFPS":@(native), @"generatedGPUFPS":@(generated), @"computedFPS":@(native + generated), @"presentedFPS":@(shown), @"displayMaximumHz":@(_displayMax), @"benchmark":@(_benchmark), @"status":self.status ?: @"Starting", @"skipReason":self.skipReason ?: @"", @"fallbackFrames":@(_fallback.load()), @"surfaceError":self.surfaceError ?: @{}, @"revision":@57, @"multiplier":@(_multiplier), @"effectiveMultiplier":@(_effective)};
     NSData *json = [NSJSONSerialization dataWithJSONObject:data options:NSJSONWritingPrettyPrinted error:nil];
     [json writeToURL:_report options:NSDataWritingAtomic error:nil];
     UIWindow *window = nil;
     for (UIWindowScene *scene in UIApplication.sharedApplication.connectedScenes) if ([scene isKindOfClass:UIWindowScene.class]) for (UIWindow *candidate in scene.windows) if (candidate.isKeyWindow) window = candidate;
     if (window && _warper.isReady) {
-        if (!_hud) { _hud = [[UILabel alloc] initWithFrame:CGRectMake(12, 54, 310, 48)]; _hud.numberOfLines = 2; _hud.font = [UIFont monospacedDigitSystemFontOfSize:11 weight:UIFontWeightMedium]; _hud.textColor = UIColor.whiteColor; _hud.backgroundColor = [UIColor.blackColor colorWithAlphaComponent:0.7]; _hud.layer.cornerRadius = 10; _hud.clipsToBounds = YES; _hud.userInteractionEnabled = NO; }
+        if (!_hud) { _hud = [[UILabel alloc] initWithFrame:CGRectMake(12, 54, 330, 66)]; _hud.numberOfLines = 3; _hud.font = [UIFont monospacedDigitSystemFontOfSize:11 weight:UIFontWeightMedium]; _hud.textColor = UIColor.whiteColor; _hud.backgroundColor = [UIColor.blackColor colorWithAlphaComponent:0.7]; _hud.layer.cornerRadius = 10; _hud.clipsToBounds = YES; _hud.userInteractionEnabled = NO; }
         if (_hud.superview != window) [window addSubview:_hud];
-        _hud.text = [NSString stringWithFormat:@" FG 2× %@ | GPU %.0f + %.0f = %.0f\n Presented %.0f / %ld Hz", _benchmark ? @"BENCH" : @"", native, generated, native + generated, shown, (long)_displayMax];
+        _hud.text = [NSString stringWithFormat:@" FG %ld× %@ | GPU %.0f + %.0f = %.0f\n Presented %.0f / %ld Hz\n %@", (long)(_benchmark ? 2 : _effective), _benchmark ? @"BENCH" : @"", native, generated, native + generated, shown, (long)_displayMax, self.skipReason ? [@"Skipped: " stringByAppendingString:self.skipReason] : (self.status ?: @"Starting")];
     }
 }
 @end
@@ -189,8 +230,45 @@ static void installPresentHooks(Class cls);
 static BOOL route(id object, id drawable) {
     return !forwardingPresent && engine && [drawable conformsToProtocol:@protocol(CAMetalDrawable)] && ![objc_getAssociatedObject(drawable, &kMetalFGIsSyntheticKey) boolValue] && [engine intercept:drawable command:object];
 }
+static BOOL routeDirect(id drawable) {
+    if (forwardingPresent || !engine || [objc_getAssociatedObject(drawable, &kMetalFGIsSyntheticKey) boolValue]) return NO;
+    id<MTLCommandBuffer> buffer; [strataCommitLock lock]; buffer = strataLastCommitted; [strataCommitLock unlock];
+    if (!buffer) { engine.skipReason = @"direct present before any committed command buffer"; return NO; }
+    return [engine intercept:drawable command:buffer committed:YES];
+}
+static void installDrawableHooks(Class cls) {
+    if (!cls) return;
+    for (NSString *name in @[@"present", @"presentAtTime:", @"presentAfterMinimumDuration:"]) {
+        SEL sel = NSSelectorFromString(name); [hookLock lock];
+        if (presentIMPs[hookKey(cls, sel)]) { [hookLock unlock]; continue; }
+        Method method = class_getInstanceMethod(cls, sel);
+        if (!method) { [hookLock unlock]; continue; }
+        IMP old = method_getImplementation(method), replacement;
+        if ([name isEqualToString:@"present"]) replacement = imp_implementationWithBlock(^(id drawable) { if (!routeDirect(drawable)) { PresentForward guard; ((void(*)(id,SEL))originalFor(drawable, sel))(drawable, sel); } });
+        else replacement = imp_implementationWithBlock(^(id drawable, CFTimeInterval time) { if (!routeDirect(drawable)) { PresentForward guard; ((void(*)(id,SEL,CFTimeInterval))originalFor(drawable, sel))(drawable, sel, time); } });
+        presentIMPs[hookKey(cls, sel)] = [NSValue valueWithPointer:(const void *)old];
+        if (!class_addMethod(cls, sel, replacement, method_getTypeEncoding(method))) method_setImplementation(class_getInstanceMethod(cls, sel), replacement);
+        [hookLock unlock];
+    }
+}
+static void installCommitHook(Class cls) {
+    if (!cls) return;
+    SEL sel = @selector(commit); [hookLock lock];
+    if (presentIMPs[hookKey(cls, sel)]) { [hookLock unlock]; return; }
+    Method method = class_getInstanceMethod(cls, sel);
+    if (!method) { [hookLock unlock]; return; }
+    IMP old = method_getImplementation(method);
+    IMP replacement = imp_implementationWithBlock(^(id buffer) {
+        if (![[(id<MTLCommandBuffer>)buffer label] hasPrefix:@"com.metalfg."]) { [strataCommitLock lock]; strataLastCommitted = buffer; [strataCommitLock unlock]; }
+        ((void(*)(id,SEL))originalFor(buffer, sel))(buffer, sel);
+    });
+    presentIMPs[hookKey(cls, sel)] = [NSValue valueWithPointer:(const void *)old];
+    if (!class_addMethod(cls, sel, replacement, method_getTypeEncoding(method))) method_setImplementation(class_getInstanceMethod(cls, sel), replacement);
+    [hookLock unlock];
+}
 static void installPresentHooks(Class cls) {
     if (!cls) return;
+    installCommitHook(cls);
     SEL plain = @selector(presentDrawable:), timed = @selector(presentDrawable:atTime:), duration = @selector(presentDrawable:afterMinimumDuration:);
     for (NSString *name in @[@"presentDrawable:", @"presentDrawable:atTime:", @"presentDrawable:afterMinimumDuration:"]) {
         SEL sel = NSSelectorFromString(name); [hookLock lock];
@@ -208,8 +286,8 @@ static void installPresentHooks(Class cls) {
 }
 
 extern "C" __attribute__((visibility("default"))) void StrataFrameGenStart(NSDictionary *config, NSString *directory) {
-    if (engine || ![@[@"2x", @"benchmark"] containsObject:config[@"mode"]]) return;
-    hookLock = [NSLock new]; presentIMPs = [NSMutableDictionary new];
+    if (engine || ![@[@"2x", @"3x", @"4x", @"benchmark"] containsObject:config[@"mode"]]) return;
+    hookLock = [NSLock new]; presentIMPs = [NSMutableDictionary new]; strataCommitLock = [NSLock new];
     [[NSFileManager defaultManager] createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil];
     engine = [[StrataFGEngine alloc] initWithConfig:config report:[NSURL fileURLWithPath:[directory stringByAppendingPathComponent:@"latest.json"]]];
     sourceRequest = [config[@"sourceFPS"] integerValue];
@@ -236,10 +314,17 @@ extern "C" __attribute__((visibility("default"))) void StrataFrameGenStart(NSDic
             layer.framebufferOnly = NO; layer.maximumDrawableCount = 3; layer.allowsNextDrawableTimeout = YES;
             [engine prepare:layer];
             static id<MTLDevice> hookedDevice;
-            if (hookedDevice != layer.device) { hookedDevice = layer.device; installPresentHooks(object_getClass([[layer.device newCommandQueue] commandBuffer])); }
+            if (hookedDevice != layer.device) {
+                hookedDevice = layer.device;
+                id<MTLCommandQueue> probe = [layer.device newCommandQueue];
+                installPresentHooks(object_getClass([probe commandBuffer]));
+                installPresentHooks(object_getClass([probe commandBufferWithUnretainedReferences]));
+                installPresentHooks(object_getClass([probe commandBufferWithDescriptor:[MTLCommandBufferDescriptor new]]));
+            }
         }
         id drawable = ((id(*)(id,SEL))originalNext)(layer,@selector(nextDrawable));
         if (!internalDrawable && drawable) objc_setAssociatedObject(drawable, &kMetalFGIsSyntheticKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (drawable) { static Class hookedDrawable; if (object_getClass(drawable) != hookedDrawable) { hookedDrawable = object_getClass(drawable); installDrawableHooks(hookedDrawable); } }
         return drawable;
     }));
     [engine report];

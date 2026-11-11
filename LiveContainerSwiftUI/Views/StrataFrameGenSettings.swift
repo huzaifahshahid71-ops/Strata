@@ -49,14 +49,14 @@ private struct StrataFrameGenAppOptions: View {
     var body: some View {
         Section("Frame generation") {
             Picker("Mode", selection: Binding(get: { all[key]?["mode"] ?? "off" }, set: { set("mode", $0) })) {
-                Text("Off").tag("off"); Text("2× displayed (experimental)").tag("2x"); Text("Uncapped 2× GPU benchmark").tag("benchmark")
+                Text("Off").tag("off"); Text("2× displayed (experimental)").tag("2x"); Text("3× displayed (experimental)").tag("3x"); Text("4× displayed (experimental)").tag("4x"); Text("Uncapped 2× GPU benchmark").tag("benchmark")
             }
             Picker("Source cadence request", selection: Binding(get: { all[key]?["sourceFPS"] ?? "0" }, set: { set("sourceFPS", $0) })) {
                 Text("Use game setting").tag("0")
-                Text("30 → 60").tag("30"); Text("45 → 90").tag("45"); Text("60 → 120").tag("60")
+                Text("30 fps source").tag("30"); Text("40 fps source").tag("40"); Text("45 fps source").tag("45"); Text("60 fps source").tag("60")
                 Text("120 → 240 computed (benchmark)").tag("120")
             }
-            Text("Cadence requests apply to CADisplayLink-based loops and may be ignored by a game's own renderer. Actual rates depend on GPU headroom, thermal conditions and the display. Offscreen benchmark frames are not displayed.").font(.caption).foregroundStyle(.secondary)
+            Text("3× and 4× add two or three generated frames per real frame and are capped by the display: on 120 Hz, 30 fps → 4× (120), 40 fps → 3× (120), 60 fps → 2× (120). More generated frames add latency and artifacts. Cadence requests apply to CADisplayLink-based loops and may be ignored by a game's own renderer. Actual rates depend on GPU headroom, thermal conditions and the display. Offscreen benchmark frames are not displayed.").font(.caption).foregroundStyle(.secondary)
         }
     }
     private func set(_ field: String, _ value: String) {

@@ -1,10 +1,14 @@
 import SwiftUI
 struct StrataSwitcherSettings: View {
+    @AppStorage("StrataSwitcherStyle", store: LCUtils.appGroupUserDefault) private var style = "cards"
     let apps: [LCAppModel]
     @State private var pinned: [String] = []
     var body: some View {
         Form {
             Section { Text("Three-finger tap shows running apps and your pinned shortcuts. The same app strip is used in Strata and inside guests.").font(.subheadline) }
+            Section {
+                Picker("Style", selection: $style) { Text("Cards").tag("cards"); Text("Compact strip").tag("strip") }.pickerStyle(.segmented)
+            } header: { Text("Three-finger tap") } footer: { Text("Cards: tap to switch, swipe a card up to close it. Works in Strata and inside apps.") }
             Section("Pinned apps") {
                 ForEach(apps, id: \.self) { app in
                     Toggle(LiveBoardAppCustomization.shared.name(app), isOn: Binding(get: { pinned.contains(liveBoardAppKey(app)) }, set: { enabled in

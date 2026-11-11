@@ -1,10 +1,10 @@
 {
-  "version": "3.0",
-  "tag": "v3.0.0",
-  "developmentRevision": 41,
-  "liveContainerBase": "3.8.11",
-  "sourceBase": "bdc07ed9d0fce19f79db78a4a1015d67d4312597",
-  "previousRelease": "v2.0.0",
-  "ipaSha256": "ce762ae8ea4419546ace0f160cc4aec9b1c544cf4becb130f6ae60510cd44c0c",
+  "version": "4.0",
+  "tag": "v4.0.0",
+  "developmentRevision": 57,
+  "liveContainerBase": "nightly 9d6ea09",
+  "sourceBase": "285f338b7713ce1f4c67addea9c60bf0121121c2",
+  "previousRelease": "v3.0.0",
+  "ipaSha256": "8444f3e0736ce0f5b665ed0d188289e705f2deb6779b907143e1e519db0c1695",
   "bundleVersionRetainedForCompatibility": true
 }

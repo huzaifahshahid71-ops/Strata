@@ -11,7 +11,7 @@ struct StrataAboutView: View {
                         Image(uiImage: icon).resizable().frame(width: 80, height: 80).clipShape(RoundedRectangle(cornerRadius: 19))
                     }
                     Text("Strata").font(.largeTitle.bold())
-                    Text("Version \(Bundle.main.object(forInfoDictionaryKey: "StrataMarketingVersion") as? String ?? "3.0 Development Preview")").font(.subheadline).foregroundStyle(.secondary)
+                    Text("Version " + StrataVersion.display + (StrataVersion.channel.map { " · " + $0 } ?? "")).font(.subheadline).foregroundStyle(.secondary)
                     Text("Your apps. Your interface.").font(.subheadline).foregroundStyle(.secondary)
                 }.frame(maxWidth: .infinity).padding(.vertical, 14)
             }

@@ -17,6 +17,9 @@ struct StrataInstalledAppPicker: View {
     @State private var importing = false
     @State private var error: String?
     @State private var importedCatalog = false
+    @State private var storeResults: [StoreApp] = []
+    @State private var storeSearching = false
+    @State private var storeMessage: String?
     private let catalog = LCPath.docPath.appendingPathComponent("Strata3/PhoneAppsCatalog.json")
     private var filtered: [StrataInstalledPhoneApp] { apps.filter { query.isEmpty || $0.name.localizedCaseInsensitiveContains(query) } }
     var body: some View {
@@ -26,7 +29,7 @@ struct StrataInstalledAppPicker: View {
             }
             if query.isEmpty { Section {
                 Text("Tap an app to add it to Strata. No Shortcut is created.").font(.footnote)
-                if importedCatalog { Text("Showing the last app list imported from your Mac. Apps that have since been removed may no longer open.").font(.caption).foregroundStyle(.secondary) }
+                if importedCatalog { Text("Showing the app list exported from your Mac" + (catalogDate.map { " on " + $0.formatted(date: .abbreviated, time: .shortened) } ?? "") + ". iOS doesn't let Strata see apps installed since then: search the App Store below, or export again from your Mac.").font(.caption).foregroundStyle(.secondary) }
                 if loading { ProgressView("Reading installed apps…") }
                 if !loading && apps.isEmpty {
                     Text("iOS has restricted the installed-app list. Import an app list from a paired Mac to choose apps by name.").font(.footnote)
@@ -43,6 +46,21 @@ struct StrataInstalledAppPicker: View {
                         HStack { StrataPhoneAppIconView(bundleIdentifier: app.id); Text(app.name); Spacer(); Image(systemName: added ? "checkmark.circle.fill" : "plus.circle").foregroundStyle(added ? .green : .blue) }
                     }.disabled(added).accessibilityValue(added ? "Added" : "Not added").accessibilityIdentifier("installedApp." + app.id)
                 }
+            }
+            if !query.trimmingCharacters(in: .whitespaces).isEmpty {
+                Section {
+                    Button { Task { await searchStore() } } label: { Label(storeSearching ? "Searching…" : "Search the App Store for “\(query)”", systemImage: "magnifyingglass.circle") }
+                        .disabled(storeSearching).accessibilityIdentifier("installedApp.storeSearch")
+                    if let storeMessage { Text(storeMessage).font(.caption).foregroundStyle(.secondary) }
+                    ForEach(storeResults) { app in
+                        let added = store.entries.contains { $0.bundleIdentifier == app.id }
+                        Button { Task { await addStoreApp(app) } } label: {
+                            HStack { AsyncImage(url: app.artwork) { $0.resizable() } placeholder: { Color.gray.opacity(0.3) }.frame(width: 30, height: 30).clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                VStack(alignment: .leading) { Text(app.name).lineLimit(1); Text(app.seller).font(.caption2).foregroundStyle(.secondary).lineLimit(1) }
+                                Spacer(); Image(systemName: added ? "checkmark.circle.fill" : "plus.circle").foregroundStyle(added ? .green : .blue) }
+                        }.disabled(added)
+                    }
+                } header: { Text("Not in the list?") } footer: { Text("Adds the app with its App Store name and icon. If iOS blocks opening it directly and it has no known app link, set an App URL or Shortcut for it under Advanced.") }
             }
             Section {
                 Button("Reload installed apps") { Task { await reload() } }
@@ -65,6 +83,36 @@ struct StrataInstalledAppPicker: View {
                 apps = values; importedCatalog = true; loading = false
             } catch { self.error = error.localizedDescription }
         }
+    }
+    private var catalogDate: Date? { (try? catalog.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate }
+    struct StoreApp: Identifiable { let id: String; let name: String; let seller: String; let artwork: URL? }
+    /// Apple's public App Store search; only the typed text is sent.
+    private func searchStore() async {
+        let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !term.isEmpty else { return }
+        storeSearching = true; storeMessage = nil; defer { storeSearching = false }
+        var components = URLComponents(string: "https://itunes.apple.com/search")!
+        components.queryItems = [URLQueryItem(name: "term", value: term), URLQueryItem(name: "entity", value: "software"), URLQueryItem(name: "limit", value: "12"), URLQueryItem(name: "country", value: Locale.current.regionCode ?? "US")]
+        do {
+            guard let url = components.url else { return }
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let results = ((try JSONSerialization.jsonObject(with: data) as? [String: Any])?["results"] as? [[String: Any]]) ?? []
+            storeResults = results.compactMap { item in
+                guard let id = item["bundleId"] as? String, StrataPhoneAppPolicy.validBundleIdentifier(id), let name = item["trackName"] as? String else { return nil }
+                return StoreApp(id: id, name: String(name.prefix(120)), seller: item["sellerName"] as? String ?? "", artwork: (item["artworkUrl512"] as? String ?? item["artworkUrl100"] as? String).flatMap(URL.init(string:)))
+            }
+            if storeResults.isEmpty { storeMessage = "No App Store results for “\(term)”." }
+        } catch { storeMessage = "App Store search failed: " + error.localizedDescription }
+    }
+    private func addStoreApp(_ app: StoreApp) async {
+        if let artwork = app.artwork, let (data, _) = try? await URLSession.shared.data(from: artwork), let image = UIImage(data: data), let png = image.pngData() {
+            let folder = StrataPhoneApps.iconDirectory
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try? png.write(to: folder.appendingPathComponent(app.id + ".png"), options: .atomic)
+            StrataPhoneApps.invalidateIcons()
+        }
+        do { try store.save(.init(name: app.name, target: "", shortcut: false, bundleIdentifier: app.id), image: nil) }
+        catch { self.error = error.localizedDescription }
     }
     private func reload() async {
         loading = true

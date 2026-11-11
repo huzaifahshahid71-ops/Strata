@@ -261,10 +261,10 @@ struct LiveBoardConsoleScreen: View {
                 Image(systemName: "square.grid.2x2").frame(width: 36, height: 36)
                     .overlay(Circle().stroke(navigation.focus == .header && navigation.headerIndex == 2 ? .white : .clear, lineWidth: 2))
             }.accessibilityLabel("Manage apps").accessibilityIdentifier("console.manage")
-            Button { controller.stop(); openInterface() } label: {
+            Button { controller.stop(); NotificationCenter.default.post(name: .strataOpenSettings, object: nil) } label: {
                 Image(systemName: "gearshape").frame(width: 36, height: 36)
                     .overlay(Circle().stroke(navigation.focus == .header && navigation.headerIndex == 3 ? .white : .clear, lineWidth: 2))
-            }.accessibilityLabel("Interface").accessibilityIdentifier("console.interface")
+            }.accessibilityLabel("Settings").accessibilityIdentifier("console.settings")
         }.buttonStyle(.plain).frame(maxWidth: .infinity).frame(height: 40)
     }
     private func migrateLibrariesIfNeeded() {
@@ -597,7 +597,7 @@ struct LiveBoardConsoleScreen: View {
                 case 0: favoritesOnly = false
                 case 1: favoritesOnly = true
                 case 2: controller.stop(); openManagement()
-                default: controller.stop(); openInterface()
+                default: controller.stop(); NotificationCenter.default.post(name: .strataOpenSettings, object: nil)
                 }
             } else if navigation.focus == .details { showDetails() }
             else if let app = selected { activate(app) }

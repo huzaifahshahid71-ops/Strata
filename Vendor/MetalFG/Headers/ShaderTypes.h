@@ -31,6 +31,7 @@ typedef struct {
     float disocclusionThreshold; // Disocclusion color divergence threshold (0.08 to 0.35, default 0.20)
     float motionDeadzone;        // Minimum motion magnitude cutoff (0.0001 to 0.0020, default 0.0004)
     float debugTint;             // 1.0 = Visual debug tint active, 0.0 = Normal
+    float phase;                 // Strata: position between previous (0) and current (1) frame; 0.5 = midpoint (2x)
 } MetalFGWarpUniforms;
 
 // Buffer indices shared between host code and MSL

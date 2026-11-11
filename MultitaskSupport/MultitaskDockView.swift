@@ -298,6 +298,7 @@ class AppInfoProvider {
     override init() {
         super.init()
         NotificationCenter.default.addObserver(forName: Notification.Name("StrataMinimizeAllWindows"), object: nil, queue: .main) { [weak self] _ in self?.minimizeAllWindows() }
+        LCUtils.strataSetSwitcherLiveProvider({ key in MultitaskDockManager.shared.liveView(forKey: key ?? "") }, front: { MultitaskDockManager.shared.frontKey() })
         keyWindow!.rootViewController!.view.subviews.first!.addSubview(self.windowHostingView)
         setupDockView()
         let observer = Unmanaged.passUnretained(self).toOpaque()
@@ -798,8 +799,28 @@ class AppInfoProvider {
         let pid = command.pid, action = command.action
         for app in apps {
             guard let vc = app.view?._viewDelegate() as? DecoratedAppSceneViewController, vc.appSceneVC.pid == Int32(pid) else { continue }
+            if action == "switcher" {
+                // Strata shows the deck itself so the running app's card can be live.
+                LCUtils.strataToggleAppSwitcher()
+                return
+            }
+            if action == "closeOther" {
+                // The requesting app stays on screen; just close the other app named in switch.json.
+                NotificationCenter.default.post(name: Notification.Name("StrataLaunchFromControls"), object: nil)
+                return
+            }
             hideControls()
+            if action == "closeReopen" {
+                vc.closeWindow()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { LCUtils.strataToggleAppSwitcher() }
+                return
+            }
             if action == "close" { vc.closeWindow() }
+            else if action == "library", let group = LCSharedUtils.appGroupID(), let root = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group),
+                    FileManager.default.fileExists(atPath: root.appendingPathComponent("Library/StrataControls/switch.json").path) {
+                // Switching apps: bring the next app straight to the front; this one keeps running behind it.
+                NotificationCenter.default.post(name: Notification.Name("StrataLaunchFromControls"), object: nil)
+            }
             else {
                 vc.minimizeWindow()
                 if action == "library" { DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
@@ -1280,5 +1301,25 @@ struct LoadingIconView: View {
                 .progressViewStyle(CircularProgressViewStyle(tint: .white))
                 .scaleEffect(1.2)
         }
+    }
+}
+
+
+// MARK: Live switcher cards
+@available(iOS 16.0, *)
+extension MultitaskDockManager {
+    /// Same format as liveBoardAppKey: "shared:"/"local:" + relative bundle path.
+    func switcherKey(_ app: DockAppModel) -> String? {
+        guard let info = app.appInfo else { return nil }
+        return (info.isShared ? "shared:" : "local:") + (info.relativeBundlePath ?? info.bundleIdentifier() ?? "")
+    }
+    private func presentedImmersiveApp() -> (DockAppModel, DecoratedAppSceneViewController)? {
+        for app in apps { if let vc = app.view?._viewDelegate() as? DecoratedAppSceneViewController, vc.immersivePresented { return (app, vc) } }
+        return nil
+    }
+    func frontKey() -> String? { presentedImmersiveApp().flatMap { switcherKey($0.0) } }
+    func liveView(forKey key: String) -> UIView? {
+        guard let (app, vc) = presentedImmersiveApp(), switcherKey(app) == key else { return nil }
+        return vc.view
     }
 }

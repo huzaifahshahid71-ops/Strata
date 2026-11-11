@@ -20,6 +20,7 @@ API_AVAILABLE(ios(16.0))
 - (instancetype)initWindowName:(NSString*)windowName bundleId:(NSString*)bundleId dataUUID:(NSString*)dataUUID rootVC:(UIViewController*)rootVC fullScreen:(BOOL)fullScreen jitToken:(NSString*)jitToken;
 - (void)closeWindow;
 - (void)minimizeWindow;
+- (void)dismissImmersiveAnimated:(BOOL)animated completion:(void (^)(void))completion;
 - (void)minimizeWindowPiP;
 - (void)unminimizeWindowPiP;
 - (void)updateVerticalConstraints;

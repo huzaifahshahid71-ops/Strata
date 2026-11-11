@@ -562,7 +562,7 @@ struct LiveBoardHomeScreen: View {
             .init(id: "tweaks", title: "lc.tabView.tweaks".loc, detail: secondaryInstance ? "Manage in primary instance" : "App extensions", symbol: "wrench.and.screwdriver", disabled: secondaryInstance, action: { openTab(.tweaks) }),
             .init(id: "wallpaper", title: "Wallpaper", detail: "Customize", symbol: "photo", action: { customizing = true }),
             .init(id: "apps", title: "Apps", detail: "Install & manage", symbol: "square.stack.3d.up", action: openManagement),
-            .init(id: "settings", title: "lc.tabView.settings".loc, detail: "Strata", symbol: "gearshape.fill", action: { openTab(.settings) }),
+            .init(id: "settings", title: "lc.tabView.settings".loc, detail: StrataVersion.display, symbol: "gearshape.fill", action: { NotificationCenter.default.post(name: .strataOpenSettings, object: nil) }),
             .init(id: "jit", title: "JIT", detail: "Setup & providers", symbol: "bolt.fill", action: { jitSetup = true }),
             .init(id: "storage", title: "Storage", detail: toolsStorageDetail, symbol: "internaldrive", disabled: secondaryInstance, action: { storageSetup = true }),
             .init(id: "memory", title: "Memory", detail: toolsMemoryDetail, symbol: "memorychip", action: { memorySetup = true })
