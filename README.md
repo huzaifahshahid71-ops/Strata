@@ -1,4 +1,4 @@
-# Strata 2.0
+# Strata 4.0
 
 A customizable launcher built on [LiveContainer](https://github.com/LiveContainer/LiveContainer), with three interfaces and bundled SideStore support.
 
@@ -12,7 +12,7 @@ A customizable launcher built on [LiveContainer](https://github.com/LiveContaine
 
 Artwork, categories and hidden-app choices are independent between interfaces. Imported artwork and wallpapers are available in Files → On My iPhone → Strata → Artwork.
 
-## What's new in 2.0
+## What's new in 4.0
 
 - Built-in JIT preparation using a device pairing record and LocalDevVPN, plus automatic/Universal/imported per-app script choices.
 - Integrated RAM capability account setup and actual host/guest memory reports. Entitlements remain subject to Apple's signing profiles and iOS limits.
